@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: free
     region: oregon
-    buildCommand: pip install -r requirements.txt
+    buildCommand: pip install -r requirements.txt && python -m py_compile start.py enhancements.py invoice_registry.py asaka_excel.py bot.py database.py
     startCommand: python start.py
     envVars:
       - key: RUN_MODE
