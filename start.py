@@ -3,6 +3,11 @@ import os
 # Old Render Blueprint deployments may retain an invalid Telegram webhook secret.
 os.environ.pop("WEBHOOK_SECRET", None)
 
+# Create schema and wipe old business data exactly once for the requested clean start.
+from reset_once import reset_business_data_once
+
+reset_business_data_once()
+
 # Patch spreadsheet analysis before bot import.
 import excel_docs
 import enhancements
@@ -12,7 +17,6 @@ from asaka_excel import try_analyze_asaka
 from enhancements import enrich_bank_data, install_bot_enhancements
 from incoming_invoice_support import (
     install_incoming_invoice_support,
-    patch_reconciliation_collection,
     try_analyze_invoice_registry_v2,
 )
 from invoice_registry import try_analyze_invoice_registry
@@ -21,6 +25,7 @@ from reconciliation_pdf_v2 import build_reconciliation_pdf_v2
 from reconciliation_persistence import install_reconciliation_persistence
 from reconciliation_saldo import install_saldo_fix
 from reconciliation_ui import install_reconciliation_ui
+from stable_reconciliation import install_stable_reconciliation
 
 _original_analyze_spreadsheet = excel_docs.analyze_spreadsheet_bytes
 
@@ -30,7 +35,7 @@ def _analyze_spreadsheet(data: bytes, filename: str = "statement.xlsx") -> dict:
     if registry_result is not None:
         return registry_result
 
-    # Backward-compatible fallback if a registry variant is not recognized by v3.
+    # Backward-compatible fallback for other electronic-document registry variants.
     registry_result = try_analyze_invoice_registry(data, filename)
     if registry_result is not None:
         return registry_result
@@ -43,14 +48,14 @@ def _analyze_spreadsheet(data: bytes, filename: str = "statement.xlsx") -> dict:
 
 excel_docs.analyze_spreadsheet_bytes = _analyze_spreadsheet
 
-# Import bot after all parser patches, then install UI/partner/reconciliation enhancements.
+# Import bot after parser patches, then install a single deterministic stack.
 import bot as bot_module
 
 install_bot_enhancements(bot_module)
 install_menu_customization(bot_module)
 install_incoming_invoice_support(bot_module)
 install_reconciliation_persistence(bot_module, enhancements)
-patch_reconciliation_collection(reconciliation_persistence)
+install_stable_reconciliation(reconciliation_persistence, enhancements)
 install_saldo_fix(enhancements)
 reconciliation_ui.build_reconciliation_pdf = build_reconciliation_pdf_v2
 install_reconciliation_ui(bot_module)
