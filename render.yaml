@@ -19,8 +19,6 @@ services:
         fromDatabase:
           name: asman-accounting-db-v2
           property: connectionString
-      - key: WEBHOOK_SECRET
-        generateValue: true
 
 databases:
   - name: asman-accounting-db-v2
