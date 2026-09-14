@@ -2,10 +2,15 @@ import enhancements
 from telegram import ReplyKeyboardMarkup
 
 
+ACT_OUTGOING = "📤 Чиқим — акт"
+ACT_INCOMING = "📥 Кирим — акт"
+ACT_BACK = "⬅️ Акт сверка"
+HOME = "🏠 Асосий меню"
+
 ACT_DIRECTION_KB = ReplyKeyboardMarkup(
     [
-        ["📤 Чиқим", "📥 Кирим"],
-        ["🏠 Асосий меню"],
+        [ACT_OUTGOING, ACT_INCOMING],
+        [HOME],
     ],
     resize_keyboard=True,
 )
@@ -54,7 +59,7 @@ def _partner_keyboard(parties, context, limit=40):
         mapping[label] = _identity(party)
         rows.append([label])
 
-    rows.append(["⬅️ Акт сверка", "🏠 Асосий меню"])
+    rows.append([ACT_BACK, HOME])
     context.user_data["act_partner_map"] = mapping
     return ReplyKeyboardMarkup(rows, resize_keyboard=True)
 
@@ -65,9 +70,11 @@ async def _show_direction(update):
         "━━━━━━━━━━━━━━━━\n\n"
         "Қайси йўналиш бўйича текширмоқчисиз?\n\n"
         "📤 ЧИҚИМ\n"
-        "Сотув / харидорлар — чиқувчи фактура ва харидордан тушган тўловлар.\n\n"
+        "Сотув / харидорлар\n"
+        "Чиқувчи фактура + харидордан тушган тўлов.\n\n"
         "📥 КИРИМ\n"
-        "Харид / етказиб берувчилар — кирувчи фактура ва етказиб берувчига тўловлар.\n\n"
+        "Харид / етказиб берувчилар\n"
+        "Кирувчи фактура + етказиб берувчига тўлов.\n\n"
         "👇 Йўналишни танланг:",
         reply_markup=ACT_DIRECTION_KB,
     )
@@ -85,28 +92,29 @@ async def _show_partners(update, context, flow):
         await update.message.reply_text(
             f"{title}\n"
             "━━━━━━━━━━━━━━━━\n\n"
-            "Ҳозирча бу йўналишда ҳамкор топилмади.\n"
+            "Ҳозирча бу йўналишда ҳамкор топилмади.\n\n"
             "Аввал банк выпискаси ёки фактура реестрини юкланг.",
             reply_markup=ACT_DIRECTION_KB,
         )
         return
 
     title = "📤 ЧИҚИМ — ХАРИДОРЛАР" if flow == "outgoing" else "📥 КИРИМ — ЕТКАЗИБ БЕРУВЧИЛАР"
-    subtitle = (
-        "Сотув бўйича акт сверка"
-        if flow == "outgoing"
-        else "Харид бўйича акт сверка"
-    )
+    subtitle = "Сотув бўйича акт сверка" if flow == "outgoing" else "Харид бўйича акт сверка"
 
     shown = min(len(parties), 40)
-    extra = "" if len(parties) <= 40 else f"\n\nℹ️ Биринчи {shown} та кўрсатилди. Қолгани учун ИНН ёки ҳисоб рақамини ёзинг."
+    extra = ""
+    if len(parties) > 40:
+        extra = (
+            f"\n\nℹ️ Биринчи {shown} та ҳамкор кўрсатилди. "
+            "Қолгани учун ИНН ёки ҳисоб рақамини ёзинг."
+        )
 
     await update.message.reply_text(
         f"{title}\n"
         "━━━━━━━━━━━━━━━━\n\n"
         f"{subtitle}\n"
-        f"👥 Ҳамкорлар: {len(parties)} та\n\n"
-        "Ҳамкорлар ИНН ва ҳисоб рақами бўйича бирлаштирилган.\n"
+        f"👥 Топилди: {len(parties)} та ҳамкор\n\n"
+        "✅ Дубликатлар ИНН ва ҳисоб рақами бўйича бирлаштирилган.\n"
         "👇 Керакли ҳамкорни танланг:"
         f"{extra}",
         reply_markup=_partner_keyboard(parties, context),
@@ -115,7 +123,11 @@ async def _show_partners(update, context, flow):
 
 def install_reconciliation_ui(bot_module):
     original_text_handler = bot_module.text_handler
-    main_labels = {button for row in bot_module.MENU.keyboard for button in row}
+    main_labels = {
+        getattr(button, "text", button)
+        for row in bot_module.MENU.keyboard
+        for button in row
+    }
 
     async def text_handler(update, context):
         text = (update.message.text or "").strip()
@@ -125,20 +137,20 @@ def install_reconciliation_ui(bot_module):
             await _show_direction(update)
             return
 
-        if text == "📤 Чиқим":
+        if text == ACT_OUTGOING:
             await _show_partners(update, context, "outgoing")
             return
 
-        if text == "📥 Кирим":
+        if text == ACT_INCOMING:
             await _show_partners(update, context, "incoming")
             return
 
-        if text == "⬅️ Акт сверка":
+        if text == ACT_BACK:
             _clear_state(context)
             await _show_direction(update)
             return
 
-        if text == "🏠 Асосий меню":
+        if text == HOME:
             _clear_state(context)
             await update.message.reply_text(
                 "🏠 Асосий меню",
@@ -155,7 +167,7 @@ def install_reconciliation_ui(bot_module):
             return
 
         if context.user_data.get("awaiting_reconciliation_partner"):
-            # User may type a full TIN or bank account instead of tapping a button.
+            # Full TIN or bank account can be typed instead of choosing a button.
             if text not in main_labels:
                 result = enhancements.reconciliation_for_partner(text)
                 _clear_state(context)
