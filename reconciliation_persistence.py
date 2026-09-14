@@ -4,30 +4,20 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from database import Document, engine, save_document
+from enhancements import (
+    _money,
+    _norm_account,
+    _norm_tin,
+    party_matches_target,
+    resolve_reconciliation_party,
+)
 
 
-def _norm_name(value):
-    return " ".join(str(value or "").split()).strip().casefold()
+def _collect_reconciliation(identifier: str):
+    target = resolve_reconciliation_party(identifier)
+    if not target:
+        return None
 
-
-def _money(value):
-    try:
-        return f"{float(value):,.2f}".replace(",", " ")
-    except Exception:
-        return "0.00"
-
-
-def _matches_partner(candidate: str, requested: str) -> bool:
-    a = _norm_name(candidate)
-    b = _norm_name(requested)
-    if not a or not b:
-        return False
-    if a == b:
-        return True
-    return min(len(a), len(b)) >= 5 and (a in b or b in a)
-
-
-def _collect_reconciliation(partner_name: str) -> dict:
     bank_rows = []
     invoice_rows = []
     seen_bank = set()
@@ -48,15 +38,20 @@ def _collect_reconciliation(partner_name: str) -> dict:
 
         if data.get("document_type") == "bank_statement":
             for tx in data.get("transactions") or data.get("transactions_preview") or []:
-                cp = str(tx.get("counterparty") or "").strip()
-                if not _matches_partner(cp, partner_name):
+                if not party_matches_target(
+                    tx.get("counterparty"),
+                    tx.get("counterparty_tin"),
+                    tx.get("counterparty_account"),
+                    target,
+                ):
                     continue
 
                 incoming = round(float(tx.get("incoming") or 0), 2)
                 outgoing = round(float(tx.get("outgoing") or 0), 2)
                 key = (
                     str(tx.get("date") or ""),
-                    _norm_name(cp),
+                    _norm_tin(tx.get("counterparty_tin")),
+                    _norm_account(tx.get("counterparty_account")),
                     str(tx.get("purpose") or "").strip(),
                     incoming,
                     outgoing,
@@ -68,22 +63,26 @@ def _collect_reconciliation(partner_name: str) -> dict:
                     "date": key[0],
                     "incoming": incoming,
                     "outgoing": outgoing,
-                    "purpose": key[2],
+                    "purpose": key[3],
                 })
 
         elif data.get("document_type") == "invoice_registry":
             for inv in data.get("invoices") or []:
-                cp = str(inv.get("counterparty") or "").strip()
-                if not _matches_partner(cp, partner_name):
-                    continue
                 if inv.get("status_group") != "signed":
+                    continue
+                if not party_matches_target(
+                    inv.get("counterparty"),
+                    inv.get("counterparty_tin"),
+                    inv.get("counterparty_account"),
+                    target,
+                ):
                     continue
 
                 amount = round(float(inv.get("total") or 0), 2)
                 key = (
                     str(inv.get("document_number") or ""),
                     str(inv.get("document_date") or ""),
-                    _norm_name(cp),
+                    _norm_tin(inv.get("counterparty_tin")),
                     str(inv.get("direction") or ""),
                     amount,
                 )
@@ -111,7 +110,11 @@ def _collect_reconciliation(partner_name: str) -> dict:
 
     return {
         "document_type": "reconciliation_report",
-        "partner": {"name": partner_name},
+        "partner": {
+            "name": target.get("name"),
+            "tin": target.get("tin"),
+            "account_number": target.get("account"),
+        },
         "document_date": period_to,
         "currency": "UZS",
         "total": net,
@@ -130,9 +133,11 @@ def _collect_reconciliation(partner_name: str) -> dict:
     }
 
 
-def _save_snapshot(partner_name: str, data: dict) -> tuple[int | None, bool]:
+def _save_snapshot(data: dict) -> tuple[int | None, bool]:
+    partner = data.get("partner") or {}
     signature_data = {
-        "partner": _norm_name(partner_name),
+        "tin": _norm_tin(partner.get("tin")),
+        "account": _norm_account(partner.get("account_number")),
         "period": data.get("statement_period"),
         "sales": data.get("sales"),
         "payments_from_partner": data.get("payments_from_partner"),
@@ -152,12 +157,10 @@ def _save_snapshot(partner_name: str, data: dict) -> tuple[int | None, bool]:
             select(Document)
             .where(Document.document_type == "reconciliation_report")
             .order_by(Document.id.desc())
-            .limit(100)
+            .limit(200)
         ).all()
 
         for doc in recent:
-            if _norm_name(doc.partner_name) != _norm_name(partner_name):
-                continue
             try:
                 previous = json.loads(doc.raw_json or "{}")
             except Exception:
@@ -165,44 +168,51 @@ def _save_snapshot(partner_name: str, data: dict) -> tuple[int | None, bool]:
             if previous.get("snapshot_key") == snapshot_key:
                 return doc.id, False
 
+    name = partner.get("name") or "partner"
     doc_id = save_document(
         data,
         telegram_file_id=None,
-        filename=f"act-sverka-{partner_name[:80]}.json",
+        filename=f"act-sverka-{str(name)[:80]}.json",
         mime_type="application/json",
     )
     return doc_id, True
 
 
-def reconciliation_for_partner(partner_name: str) -> str:
-    data = _collect_reconciliation(partner_name)
+def reconciliation_for_partner(identifier: str) -> str:
+    data = _collect_reconciliation(identifier)
+    if not data:
+        return (
+            "❌ Ҳамкор аниқланмади.\n\n"
+            "Ҳамкорни номи билан эмас, рўйхатдаги ИНН ёки ҳисоб рақами билан танланг."
+        )
+
     bank_rows = data["bank_rows"]
     invoice_rows = data["invoice_rows"]
+    partner = data.get("partner") or {}
 
     if not bank_rows and not invoice_rows:
         return (
-            f"🧮 АКТ СВЕРКА\n\nҲамкор: {partner_name}\n\n"
-            "Бу ҳамкор бўйича тасдиқланган банк операцияси ёки фактура топилмади.\n"
-            "Банк выпискаси ва фактура реестрини юбориб, «✅ Тасдиқлаш»ни босинг."
+            f"🧮 АКТ СВЕРКА\n\nҲамкор: {partner.get('name') or '—'}\n"
+            f"ИНН: {partner.get('tin') or '—'}\n"
+            f"Ҳисоб рақами: {partner.get('account_number') or '—'}\n\n"
+            "Бу ҳамкор бўйича тасдиқланган банк операцияси ёки фактура топилмади."
         )
 
-    doc_id, created = _save_snapshot(partner_name, data)
+    doc_id, created = _save_snapshot(data)
     period = data["statement_period"]
 
     lines = [
-        "🧮 АКТ СВЕРКА",
-        "",
-        f"Ҳамкор: {partner_name}",
-        f"Давр: {period.get('from') or '—'} — {period.get('to') or '—'}",
-        "",
+        "🧮 АКТ СВЕРКА", "",
+        f"Ҳамкор: {partner.get('name') or '—'}",
+        f"ИНН: {partner.get('tin') or '—'}",
+        f"Ҳисоб рақами: {partner.get('account_number') or '—'}",
+        f"Давр: {period.get('from') or '—'} — {period.get('to') or '—'}", "",
         f"🧾 Имзоланган сотув фактуралари: {_money(data['sales'])} UZS",
         f"📥 Ҳамкордан тушган тўлов: {_money(data['payments_from_partner'])} UZS",
-        f"💰 Дебитор қарз: {_money(data['receivable'])} UZS",
-        "",
+        f"💰 Дебитор қарз: {_money(data['receivable'])} UZS", "",
         f"📦 Кирувчи фактуралар: {_money(data['purchases'])} UZS",
         f"📤 Ҳамкорга тўланган: {_money(data['payments_to_partner'])} UZS",
-        f"💸 Кредитор қарз: {_money(data['payable'])} UZS",
-        "",
+        f"💸 Кредитор қарз: {_money(data['payable'])} UZS", "",
         f"⚖️ Соф фарқ: {_money(data['net'])} UZS",
         f"🏦 Банк операциялари: {data['bank_operations_count']} та",
         f"🧾 Фактуралар: {data['invoice_count']} та",
@@ -258,16 +268,15 @@ def install_reconciliation_persistence(bot_module, enhancements_module):
     original_text_handler = bot_module.text_handler
 
     async def text_handler(update, context):
-        text = (update.message.text or "").strip()
-        if text != "📊 Ҳисоботлар":
+        text_value = (update.message.text or "").strip()
+        if text_value != "📊 Ҳисоботлар":
             await original_text_handler(update, context)
             return
 
         base = bot_module.report()
         total, recent = _recent_reports(limit=5)
         lines = [
-            "📊 ҲИСОБОТ",
-            "",
+            "📊 ҲИСОБОТ", "",
             f"👥 Ҳамкорлар: {base['partners']}",
             f"📄 Шартномалар: {base['contracts']}",
             f"📦 Хом ашё турлари: {base['materials']}",
@@ -278,14 +287,16 @@ def install_reconciliation_persistence(bot_module, enhancements_module):
 
         if recent:
             lines += ["", "🗂 Сўнгги акт сверка таҳлиллари:"]
-            for doc, data in recent:
-                period = data.get("statement_period") or {}
-                partner = doc.partner_name or (data.get("partner") or {}).get("name") or "—"
+            for doc, row in recent:
+                period = row.get("statement_period") or {}
+                partner = row.get("partner") or {}
+                name = partner.get("name") or doc.partner_name or "—"
+                tin = partner.get("tin") or "—"
                 lines.append(
-                    f"• {partner} | {period.get('from') or '—'} — {period.get('to') or '—'} | "
-                    f"дебитор {_money(data.get('receivable'))} | "
-                    f"кредитор {_money(data.get('payable'))} | "
-                    f"фарқ {_money(data.get('net'))}"
+                    f"• {name} | ИНН {tin} | {period.get('from') or '—'} — {period.get('to') or '—'} | "
+                    f"дебитор {_money(row.get('receivable'))} | "
+                    f"кредитор {_money(row.get('payable'))} | "
+                    f"фарқ {_money(row.get('net'))}"
                 )
 
         await update.message.reply_text("\n".join(lines), reply_markup=bot_module.MENU)
