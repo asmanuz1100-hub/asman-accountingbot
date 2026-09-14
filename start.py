@@ -10,6 +10,7 @@ import reconciliation_ui
 from asaka_excel import try_analyze_asaka
 from enhancements import enrich_bank_data, install_bot_enhancements
 from invoice_registry import try_analyze_invoice_registry
+from menu_customization import install_menu_customization
 from reconciliation_pdf_v2 import build_reconciliation_pdf_v2
 from reconciliation_persistence import install_reconciliation_persistence
 from reconciliation_saldo import install_saldo_fix
@@ -35,6 +36,7 @@ excel_docs.analyze_spreadsheet_bytes = _analyze_spreadsheet
 import bot as bot_module
 
 install_bot_enhancements(bot_module)
+install_menu_customization(bot_module)
 install_reconciliation_persistence(bot_module, enhancements)
 install_saldo_fix(enhancements)
 reconciliation_ui.build_reconciliation_pdf = build_reconciliation_pdf_v2
