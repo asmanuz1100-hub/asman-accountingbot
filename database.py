@@ -1,9 +1,10 @@
 import json
 import os
+import re
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, func, select
+from sqlalchemy import DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint, create_engine, func, inspect, select, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column
 
 
@@ -16,6 +17,42 @@ def _db_url() -> str:
     return url
 
 
+def _norm_tin(value: Optional[str]) -> str:
+    return re.sub(r"\D", "", str(value or ""))
+
+
+def _norm_account(value: Optional[str]) -> str:
+    return re.sub(r"[^0-9A-Za-z]", "", str(value or "")).upper()
+
+
+def _norm_name(value: Optional[str]) -> str:
+    return " ".join(str(value or "").split()).strip().casefold()
+
+
+def _partner_key(tin: Optional[str], account_number: Optional[str], name: Optional[str]) -> tuple[str, str]:
+    tin_n = _norm_tin(tin)
+    if tin_n:
+        return ("tin", tin_n)
+    account_n = _norm_account(account_number)
+    if account_n:
+        return ("account", account_n)
+    return ("name", _norm_name(name))
+
+
+def _merge_partner_type(current: str, new: str) -> str:
+    current = (current or "auto").strip().lower()
+    new = (new or "auto").strip().lower()
+    if new == "auto":
+        return current
+    if current in ("auto", "customer"):
+        return new
+    if current == new or current == "both":
+        return current
+    if {current, new} <= {"incoming", "outgoing"}:
+        return "both"
+    return new
+
+
 class Base(DeclarativeBase):
     pass
 
@@ -23,8 +60,10 @@ class Base(DeclarativeBase):
 class Partner(Base):
     __tablename__ = "partners"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # Name is display data. Identity is TIN first, bank account second.
     name: Mapped[str] = mapped_column(String(255), unique=True, index=True)
-    tin: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    tin: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
+    account_number: Mapped[Optional[str]] = mapped_column(String(64), nullable=True, index=True)
     partner_type: Mapped[str] = mapped_column(String(32), default="customer")
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
@@ -73,23 +112,76 @@ engine = create_engine(_db_url(), pool_pre_ping=True)
 
 def init_db() -> None:
     Base.metadata.create_all(engine)
+    # Existing Render/Postgres databases need a lightweight migration because
+    # create_all() does not add new columns to an existing table.
+    try:
+        cols = {c["name"] for c in inspect(engine).get_columns("partners")}
+        if "account_number" not in cols:
+            with engine.begin() as conn:
+                conn.execute(text("ALTER TABLE partners ADD COLUMN account_number VARCHAR(64)"))
+    except Exception:
+        # Fresh databases already have the column; keep startup resilient.
+        pass
 
 
-def upsert_partner(name: str, tin: Optional[str] = None, partner_type: str = "customer") -> Partner:
-    clean = (name or "").strip()
+def upsert_partner(name: str, tin: Optional[str] = None, partner_type: str = "customer",
+                   account_number: Optional[str] = None) -> Partner:
+    clean = " ".join((name or "").split()).strip()
     if not clean:
         raise ValueError("Ҳамкор номи бўш бўлиши мумкин эмас")
 
+    tin_n = _norm_tin(tin) or None
+    account_n = _norm_account(account_number) or None
+
     with Session(engine) as session:
-        partner = session.scalar(select(Partner).where(func.lower(Partner.name) == clean.lower()))
+        partner = None
+
+        # TIN is the strongest legal-entity identifier. This prevents the same
+        # company appearing twice just because the name is written differently.
+        if tin_n:
+            partner = session.scalar(select(Partner).where(Partner.tin == tin_n).order_by(Partner.id))
+
+        # If TIN is unavailable, bank account becomes the identity key.
+        if partner is None and account_n:
+            partner = session.scalar(
+                select(Partner).where(Partner.account_number == account_n).order_by(Partner.id)
+            )
+
+        # Name is only a last-resort fallback when no strong identifier exists.
+        if partner is None and not tin_n and not account_n:
+            partner = session.scalar(select(Partner).where(func.lower(Partner.name) == clean.lower()))
+
+        # Old rows may have been created by name before TIN/account support.
+        if partner is None and (tin_n or account_n):
+            legacy = session.scalar(select(Partner).where(func.lower(Partner.name) == clean.lower()))
+            if legacy and not _norm_tin(legacy.tin) and not _norm_account(legacy.account_number):
+                partner = legacy
+
         if partner:
-            if tin and not partner.tin:
-                partner.tin = tin
+            if tin_n and not _norm_tin(partner.tin):
+                partner.tin = tin_n
+            if account_n and not _norm_account(partner.account_number):
+                partner.account_number = account_n
+            partner.partner_type = _merge_partner_type(partner.partner_type, partner_type)
             session.commit()
             session.refresh(partner)
             return partner
 
-        partner = Partner(name=clean, tin=tin, partner_type=partner_type)
+        # Existing DBs still have a unique name constraint. In the rare case
+        # two different legal entities have exactly the same display name,
+        # keep the user-facing name readable while making the stored row unique.
+        stored_name = clean
+        same_name = session.scalar(select(Partner).where(func.lower(Partner.name) == clean.lower()))
+        if same_name:
+            suffix = tin_n or account_n or str(int(datetime.utcnow().timestamp()))
+            stored_name = f"{clean} [{suffix[-8:]}]"[:255]
+
+        partner = Partner(
+            name=stored_name,
+            tin=tin_n,
+            account_number=account_n,
+            partner_type=partner_type or "auto",
+        )
         session.add(partner)
         session.commit()
         session.refresh(partner)
@@ -98,13 +190,26 @@ def upsert_partner(name: str, tin: Optional[str] = None, partner_type: str = "cu
 
 def list_partners(limit: int = 50):
     with Session(engine) as session:
-        return list(session.scalars(select(Partner).order_by(Partner.name).limit(limit)).all())
+        rows = list(session.scalars(select(Partner).order_by(Partner.id)).all())
+
+    # Hide legacy duplicates by TIN/account in all menus and reports.
+    unique = {}
+    for p in rows:
+        key = _partner_key(p.tin, p.account_number, p.name)
+        old = unique.get(key)
+        if old is None:
+            unique[key] = p
+        elif not _norm_account(old.account_number) and _norm_account(p.account_number):
+            unique[key] = p
+
+    result = sorted(unique.values(), key=lambda p: p.name.casefold())
+    return result[:limit]
 
 
 def add_contract(partner_name: str, number: str, total_amount: float,
                  contract_date: Optional[str] = None, currency: str = "UZS",
-                 tin: Optional[str] = None) -> Contract:
-    partner = upsert_partner(partner_name, tin=tin)
+                 tin: Optional[str] = None, account_number: Optional[str] = None) -> Contract:
+    partner = upsert_partner(partner_name, tin=tin, account_number=account_number)
     with Session(engine) as session:
         existing = session.scalar(
             select(Contract).where(
@@ -151,7 +256,7 @@ def add_material(name: str, qty: float, unit: str = "kg") -> None:
         raise ValueError("Хом ашё номи бўш")
 
     with Session(engine) as session:
-        material = session.scalar(select(Material).where(func.lower(Material.name) == clean.lower()))
+        material = session.scalar(select(Material).where(func.lower( Material.name) == clean.lower()))
         if material:
             material.qty += float(qty)
             if unit:
@@ -199,7 +304,6 @@ def save_document(data: dict, telegram_file_id: Optional[str], filename: Optiona
 
 def report() -> dict:
     with Session(engine) as session:
-        partners = session.scalar(select(func.count()).select_from(Partner)) or 0
         contracts = session.scalar(select(func.count()).select_from(Contract)) or 0
         materials = session.scalar(select(func.count()).select_from(Material)) or 0
         documents = session.scalar(select(func.count()).select_from(Document)) or 0
@@ -207,10 +311,10 @@ def report() -> dict:
             select(func.coalesce(func.sum(Contract.total_amount - Contract.used_amount), 0))
         ) or 0
 
-        return {
-            "partners": int(partners),
-            "contracts": int(contracts),
-            "materials": int(materials),
-            "documents": int(documents),
-            "contract_balance": float(contract_balance),
-        }
+    return {
+        "partners": len(list_partners(limit=100000)),
+        "contracts": int(contracts),
+        "materials": int(materials),
+        "documents": int(documents),
+        "contract_balance": float(contract_balance),
+    }
