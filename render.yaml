@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: free
     region: oregon
-    buildCommand: pip install -r requirements.txt && python -m py_compile start.py enhancements.py invoice_registry.py asaka_excel.py bot.py database.py
+    buildCommand: pip install -r requirements.txt && python -m py_compile start.py bot.py database.py excel_docs.py enhancements.py asaka_excel.py invoice_registry.py incoming_invoice_support.py menu_customization.py reconciliation_persistence.py reconciliation_saldo.py reconciliation_ui.py reconciliation_pdf_v2.py reset_once.py stable_reconciliation.py
     startCommand: python start.py
     envVars:
       - key: RUN_MODE
