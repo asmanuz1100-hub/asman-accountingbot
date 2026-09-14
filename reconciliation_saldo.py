@@ -25,20 +25,24 @@ def add_closing_saldo(data: dict) -> dict:
 
     flow = data.get("flow")
     if abs(closing_net) < 0.01:
+        data["closing_status"] = "settled"
         data["closing_result"] = "Қарздорлик йўқ"
     elif flow == "outgoing":
-        data["closing_result"] = (
-            f"Ҳамкор қарзи: {_money(closing_debit)} UZS"
-            if closing_debit > 0
-            else f"Ҳамкор аванси: {_money(closing_credit)} UZS"
-        )
+        if closing_debit > 0:
+            data["closing_status"] = "debt"
+            data["closing_result"] = f"Ҳамкор қарзи: {_money(closing_debit)} UZS"
+        else:
+            data["closing_status"] = "advance"
+            data["closing_result"] = f"Ҳамкор аванси: {_money(closing_credit)} UZS"
     elif flow == "incoming":
-        data["closing_result"] = (
-            f"Бизнинг ҳамкор олдидаги қарзимиз: {_money(closing_credit)} UZS"
-            if closing_credit > 0
-            else f"Етказиб берувчига аванс: {_money(closing_debit)} UZS"
-        )
+        if closing_credit > 0:
+            data["closing_status"] = "debt"
+            data["closing_result"] = f"Бизнинг ҳамкор олдидаги қарзимиз: {_money(closing_credit)} UZS"
+        else:
+            data["closing_status"] = "advance"
+            data["closing_result"] = f"Етказиб берувчига аванс: {_money(closing_debit)} UZS"
     else:
+        data["closing_status"] = "debt" if closing_debit > 0 else "advance"
         side = "ДЕБЕТ" if closing_debit > 0 else "КРЕДИТ"
         data["closing_result"] = f"{side} сальдо: {_money(abs(closing_net))} UZS"
 
@@ -57,12 +61,15 @@ def install_saldo_fix(enhancements_module):
         data = add_closing_saldo(result.get("data") or {})
         period = data.get("statement_period") or {}
         closing_date = period.get("to") or data.get("document_date") or "—"
+        status = data.get("closing_status")
+        icon = "🔴" if status == "debt" else "🟢" if status == "advance" else "⚪"
+        status_text = "ҚАРЗДОРЛИК" if status == "debt" else "АВАНС" if status == "advance" else "ҚАРЗ ЙЎҚ"
         saldo_text = (
             "\n\n📌 ЯКУНИЙ САЛЬДО"
             f"\n📅 {closing_date} ҳолатига"
             f"\nДебет: {_money(data.get('closing_debit'))} UZS"
             f"\nКредит: {_money(data.get('closing_credit'))} UZS"
-            f"\n✅ {data.get('closing_result')}"
+            f"\n{icon} {status_text}: {data.get('closing_result')}"
         )
         if "📌 ЯКУНИЙ САЛЬДО" not in (result.get("text") or ""):
             result["text"] = (result.get("text") or "") + saldo_text
