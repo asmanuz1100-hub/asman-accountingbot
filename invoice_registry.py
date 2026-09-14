@@ -18,6 +18,10 @@ def _norm(value: Any) -> str:
     return _text(value).lower().replace("ё", "е").replace("ʻ", "'").replace("’", "'").strip()
 
 
+def _tin(value: Any) -> str:
+    return re.sub(r"\D", "", _text(value))
+
+
 def _num(value: Any) -> float:
     if value is None or value == "":
         return 0.0
@@ -150,6 +154,7 @@ def try_analyze_invoice_registry(data: bytes, filename: str = "registry.xlsx") -
 
         status = _text(_cell(row, c_status))
         direction_raw = _text(_cell(row, c_dir))
+        partner_tin = _tin(_cell(row, c_tin)) or None
         invoices.append({
             "row_no": int(first),
             "direction": _direction(direction_raw),
@@ -159,7 +164,7 @@ def try_analyze_invoice_registry(data: bytes, filename: str = "registry.xlsx") -
             "document_type_name": _text(_cell(row, c_type)),
             "contract": _text(_cell(row, c_contract)) or None,
             "counterparty": partner or None,
-            "counterparty_tin": _text(_cell(row, c_tin)) or None,
+            "counterparty_tin": partner_tin,
             "document_number": doc_no or None,
             "document_date": _date(_cell(row, c_doc_date)) or _text(_cell(row, c_doc_date)) or None,
             "amount_without_vat": round(_num(_cell(row, c_net)), 2),
@@ -183,15 +188,27 @@ def try_analyze_invoice_registry(data: bytes, filename: str = "registry.xlsx") -
     all_total = round(sum(x["total"] for x in invoices), 2)
     pending_total = round(sum(x["total"] for x in pending), 2)
 
-    partner_totals = defaultdict(lambda: {"count": 0, "signed_count": 0, "signed_outgoing": 0.0, "signed_incoming": 0.0, "tin": None})
+    # Group by TIN whenever it exists. Name spelling no longer creates duplicates.
+    partner_totals = defaultdict(lambda: {
+        "name": None,
+        "count": 0,
+        "signed_count": 0,
+        "signed_outgoing": 0.0,
+        "signed_incoming": 0.0,
+        "tin": None,
+    })
     for inv in invoices:
         name = (inv.get("counterparty") or "").strip()
-        if not name:
+        tin = _tin(inv.get("counterparty_tin"))
+        if not name and not tin:
             continue
-        item = partner_totals[name]
+        key = f"tin:{tin}" if tin else f"name:{_norm(name)}"
+        item = partner_totals[key]
+        if not item["name"] or len(name) > len(item["name"]):
+            item["name"] = name
         item["count"] += 1
-        if inv.get("counterparty_tin") and not item["tin"]:
-            item["tin"] = inv["counterparty_tin"]
+        if tin:
+            item["tin"] = tin
         if inv["status_group"] == "signed":
             item["signed_count"] += 1
             if inv["direction"] == "outgoing":
@@ -200,13 +217,13 @@ def try_analyze_invoice_registry(data: bytes, filename: str = "registry.xlsx") -
                 item["signed_incoming"] += inv["total"]
 
     counterparties = []
-    for name, vals in sorted(
+    for _, vals in sorted(
         partner_totals.items(),
         key=lambda kv: kv[1]["signed_outgoing"] + kv[1]["signed_incoming"],
         reverse=True,
     ):
         counterparties.append({
-            "name": name[:255],
+            "name": (vals["name"] or "Номсиз ҳамкор")[:255],
             "tin": vals["tin"],
             "invoice_count": vals["count"],
             "signed_count": vals["signed_count"],
@@ -253,5 +270,5 @@ def try_analyze_invoice_registry(data: bytes, filename: str = "registry.xlsx") -
             f"имзоланган кирувчи фактуралар {signed_incoming:,.2f} UZS."
         ),
         "source_filename": filename,
-        "source_format": "invoice_registry_xlsx_v1",
+        "source_format": "invoice_registry_xlsx_v2",
     }
