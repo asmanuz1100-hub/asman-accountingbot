@@ -1,5 +1,4 @@
 import json
-import re
 from collections import defaultdict
 
 from sqlalchemy import select
@@ -11,12 +10,18 @@ from database import Document, engine, list_partners, upsert_partner
 
 
 def _norm_name(value):
-    text = " ".join(str(value or "").split()).strip()
-    return text.casefold()
+    return " ".join(str(value or "").split()).strip().casefold()
+
+
+def _money(value):
+    try:
+        return f"{float(value):,.2f}".replace(",", " ")
+    except Exception:
+        return "0.00"
 
 
 def enrich_bank_data(raw: bytes, filename: str, data: dict) -> dict:
-    """Attach full bank transactions so partners and reconciliation can use them."""
+    """Attach full bank transactions for partner sync and reconciliation."""
     if not isinstance(data, dict) or data.get("document_type") != "bank_statement":
         return data
     if data.get("transactions"):
@@ -50,50 +55,56 @@ def enrich_bank_data(raw: bytes, filename: str, data: dict) -> dict:
 
     if not transactions:
         transactions = list(data.get("transactions_preview") or [])
-
     data["transactions"] = transactions
     return data
 
 
-def _partner_names_from_data(data: dict) -> list[str]:
-    names = set()
-    own_name = _norm_name(data.get("account_holder"))
+def _partner_names_from_data(data: dict) -> list[tuple[str, str | None]]:
+    found = {}
 
     partner = data.get("partner") or {}
     if isinstance(partner, dict) and partner.get("name"):
-        names.add(" ".join(str(partner["name"]).split()).strip())
+        name = " ".join(str(partner["name"]).split()).strip()
+        if name:
+            found[_norm_name(name)] = (name[:255], partner.get("tin"))
 
     if data.get("document_type") == "bank_statement":
-        for tx in data.get("transactions") or []:
+        own_name = _norm_name(data.get("account_holder"))
+        for tx in data.get("transactions") or data.get("transactions_preview") or []:
             name = " ".join(str(tx.get("counterparty") or "").split()).strip()
-            if not name:
-                continue
             norm = _norm_name(name)
-            if norm == own_name:
-                continue
-            if len(norm) < 3:
+            if not name or norm == own_name or len(norm) < 3:
                 continue
             if any(bad in norm for bad in ("итоговый оборот", "остаток на", "оборот дебет", "оборот кредит")):
                 continue
-            names.add(name[:255])
+            tin = tx.get("counterparty_tin")
+            found[norm] = (name[:255], str(tin).strip() if tin else None)
 
-        if not names:
-            for item in data.get("top_counterparties") or []:
-                name = " ".join(str(item.get("name") or "").split()).strip()
-                if name and _norm_name(name) != own_name:
-                    names.add(name[:255])
+        for item in data.get("top_counterparties") or []:
+            name = " ".join(str(item.get("name") or "").split()).strip()
+            norm = _norm_name(name)
+            if name and norm != own_name and norm not in found:
+                found[norm] = (name[:255], None)
 
-    return sorted(names, key=str.casefold)
+    if data.get("document_type") == "invoice_registry":
+        for item in data.get("counterparties") or []:
+            name = " ".join(str(item.get("name") or "").split()).strip()
+            if not name:
+                continue
+            tin = item.get("tin")
+            found[_norm_name(name)] = (name[:255], str(tin).strip() if tin else None)
+
+    return sorted(found.values(), key=lambda x: x[0].casefold())
 
 
 def sync_partners_from_data(data: dict) -> int:
-    names = _partner_names_from_data(data)
-    for name in names:
+    partners = _partner_names_from_data(data)
+    for name, tin in partners:
         try:
-            upsert_partner(name, partner_type="bank_counterparty" if data.get("document_type") == "bank_statement" else "customer")
+            upsert_partner(name, tin=tin, partner_type="auto")
         except Exception:
             continue
-    return len(names)
+    return len(partners)
 
 
 def _matches_partner(candidate: str, requested: str) -> bool:
@@ -103,18 +114,18 @@ def _matches_partner(candidate: str, requested: str) -> bool:
         return False
     if a == b:
         return True
-    if min(len(a), len(b)) >= 5 and (a in b or b in a):
-        return True
-    return False
+    return min(len(a), len(b)) >= 5 and (a in b or b in a)
 
 
 def reconciliation_for_partner(partner_name: str) -> str:
-    found = []
-    seen = set()
+    bank_rows = []
+    invoice_rows = []
+    seen_bank = set()
+    seen_invoice = set()
 
     with Session(engine) as session:
         docs = session.scalars(
-            select(Document).where(Document.document_type == "bank_statement").order_by(Document.id)
+            select(Document).where(Document.document_type.in_(["bank_statement", "invoice_registry"])).order_by(Document.id)
         ).all()
 
     for doc in docs:
@@ -122,83 +133,133 @@ def reconciliation_for_partner(partner_name: str) -> str:
             data = json.loads(doc.raw_json or "{}")
         except Exception:
             continue
-        transactions = data.get("transactions") or data.get("transactions_preview") or []
-        for tx in transactions:
-            cp = str(tx.get("counterparty") or "").strip()
-            if not _matches_partner(cp, partner_name):
-                continue
-            key = (
-                str(tx.get("date") or ""),
-                _norm_name(cp),
-                str(tx.get("purpose") or "").strip(),
-                round(float(tx.get("incoming") or 0), 2),
-                round(float(tx.get("outgoing") or 0), 2),
-            )
-            if key in seen:
-                continue
-            seen.add(key)
-            found.append({
-                "date": key[0],
-                "counterparty": cp,
-                "purpose": key[2],
-                "incoming": key[3],
-                "outgoing": key[4],
-            })
 
-    if not found:
-        return (
-            f"🧮 АКТ СВЕРКА\n\nҲамкор: {partner_name}\n\n"
-            "Бу ҳамкор бўйича сақланган банк операциялари топилмади.\n"
-            "Аввал банк выпискасини юбориб, «✅ Тасдиқлаш»ни босинг."
-        )
+        if data.get("document_type") == "bank_statement":
+            for tx in data.get("transactions") or data.get("transactions_preview") or []:
+                cp = str(tx.get("counterparty") or "").strip()
+                if not _matches_partner(cp, partner_name):
+                    continue
+                incoming = round(float(tx.get("incoming") or 0), 2)
+                outgoing = round(float(tx.get("outgoing") or 0), 2)
+                key = (str(tx.get("date") or ""), _norm_name(cp), str(tx.get("purpose") or "").strip(), incoming, outgoing)
+                if key in seen_bank:
+                    continue
+                seen_bank.add(key)
+                bank_rows.append({"date": key[0], "incoming": incoming, "outgoing": outgoing, "purpose": key[2]})
 
-    found.sort(key=lambda x: x.get("date") or "")
-    incoming = round(sum(x["incoming"] for x in found), 2)
-    outgoing = round(sum(x["outgoing"] for x in found), 2)
-    net = round(incoming - outgoing, 2)
-    dates = [x["date"] for x in found if x.get("date")]
+        elif data.get("document_type") == "invoice_registry":
+            for inv in data.get("invoices") or []:
+                cp = str(inv.get("counterparty") or "").strip()
+                if not _matches_partner(cp, partner_name):
+                    continue
+                if inv.get("status_group") != "signed":
+                    continue
+                amount = round(float(inv.get("total") or 0), 2)
+                key = (
+                    str(inv.get("document_number") or ""),
+                    str(inv.get("document_date") or ""),
+                    _norm_name(cp),
+                    inv.get("direction"),
+                    amount,
+                )
+                if key in seen_invoice:
+                    continue
+                seen_invoice.add(key)
+                invoice_rows.append({
+                    "number": key[0],
+                    "date": key[1],
+                    "direction": inv.get("direction"),
+                    "amount": amount,
+                })
+
+    payments_from_partner = round(sum(x["incoming"] for x in bank_rows), 2)
+    payments_to_partner = round(sum(x["outgoing"] for x in bank_rows), 2)
+    sales = round(sum(x["amount"] for x in invoice_rows if x["direction"] == "outgoing"), 2)
+    purchases = round(sum(x["amount"] for x in invoice_rows if x["direction"] == "incoming"), 2)
+
+    receivable = round(sales - payments_from_partner, 2)
+    payable = round(purchases - payments_to_partner, 2)
+    net = round(receivable - payable, 2)
+
+    dates = [x["date"] for x in bank_rows + invoice_rows if x.get("date")]
     period_from = min(dates) if dates else "—"
     period_to = max(dates) if dates else "—"
 
-    def money(v):
-        return f"{float(v):,.2f}".replace(",", " ")
+    if not bank_rows and not invoice_rows:
+        return (
+            f"🧮 АКТ СВЕРКА\n\nҲамкор: {partner_name}\n\n"
+            "Бу ҳамкор бўйича тасдиқланган банк операцияси ёки фактура топилмади.\n"
+            "Банк выпискаси ва фактура реестрини юбориб, «✅ Тасдиқлаш»ни босинг."
+        )
 
     lines = [
-        "🧮 АКТ СВЕРКА — БАНК БЎЙИЧА",
+        "🧮 АКТ СВЕРКА",
         "",
         f"Ҳамкор: {partner_name}",
         f"Давр: {period_from} — {period_to}",
-        f"Операциялар: {len(found)} та",
-        f"📥 Ҳамкордан тушган: {money(incoming)}",
-        f"📤 Ҳамкорга тўланган: {money(outgoing)}",
-        f"⚖️ Соф банк фарқи: {money(net)}",
         "",
-        "Сўнгги операциялар:",
+        f"🧾 Имзоланган сотув фактуралари: {_money(sales)} UZS",
+        f"📥 Ҳамкордан тушган тўлов: {_money(payments_from_partner)} UZS",
+        f"💰 Дебитор қарз: {_money(receivable)} UZS",
+        "",
+        f"📦 Кирувчи фактуралар: {_money(purchases)} UZS",
+        f"📤 Ҳамкорга тўланган: {_money(payments_to_partner)} UZS",
+        f"💸 Кредитор қарз: {_money(payable)} UZS",
+        "",
+        f"⚖️ Соф фарқ: {_money(net)} UZS",
+        f"🏦 Банк операциялари: {len(bank_rows)} та",
+        f"🧾 Фактуралар: {len(invoice_rows)} та",
     ]
-    for tx in found[-10:]:
-        purpose = (tx.get("purpose") or "").strip()
-        if len(purpose) > 70:
-            purpose = purpose[:67] + "..."
-        lines.append(
-            f"• {tx.get('date') or '—'} | +{money(tx['incoming'])} / -{money(tx['outgoing'])}"
-            + (f"\n  {purpose}" if purpose else "")
-        )
+
+    if invoice_rows:
+        lines += ["", "Сўнгги фактуралар:"]
+        for inv in sorted(invoice_rows, key=lambda x: x.get("date") or "")[-7:]:
+            direction = "сотув" if inv["direction"] == "outgoing" else "харид"
+            lines.append(f"• {inv.get('date') or '—'} | №{inv.get('number') or '—'} | {direction} | {_money(inv['amount'])}")
+
+    return "\n".join(lines)
+
+
+def invoice_registry_text(data: dict) -> str:
+    period = data.get("statement_period") or {}
+    warnings = data.get("warnings") or []
+    counterparties = data.get("counterparties") or []
+    lines = [
+        "🧾 ФАКТУРАЛАР РЕЕСТРИ — ТАҲЛИЛ",
+        "",
+        f"Давр: {period.get('from') or '—'} — {period.get('to') or '—'}",
+        f"Жами ҳужжатлар: {data.get('invoice_count') or 0} та",
+        f"👥 Контрагентлар: {data.get('partner_count') or 0} та",
+        f"✅ Имзоланган: {data.get('signed_count') or 0} та",
+        f"⏳ Имзо кутилмоқда: {data.get('pending_count') or 0} та",
+        f"🗑 Ўчирилган: {data.get('deleted_count') or 0} та",
+        f"⚠️ Ҳақиқий эмас: {data.get('invalid_count') or 0} та",
+        "",
+        f"📤 Имзоланган чиқувчи фактуралар: {_money(data.get('signed_sales_total'))} UZS",
+        f"📥 Имзоланган кирувчи фактуралар: {_money(data.get('signed_purchases_total'))} UZS",
+        f"⏳ Имзо кутаётган сумма: {_money(data.get('pending_total'))} UZS",
+    ]
+
+    if counterparties:
+        lines += ["", "👥 Йирик контрагентлар:"]
+        for item in counterparties[:8]:
+            lines.append(
+                f"• {item.get('name') or '—'} | "
+                f"сотув {_money(item.get('signed_outgoing'))} | "
+                f"харид {_money(item.get('signed_incoming'))}"
+            )
+
+    if warnings:
+        lines += ["", "⚠️ Эътибор:"] + [f"• {w}" for w in warnings[:8]]
 
     lines += [
         "",
-        "ℹ️ Ҳозирги акт банк ҳаракатлари асосида. Чиқиш фактура модули тўлиқ улангач, "
-        "сотув + тўлов + шартнома қолдиғи билан тўлиқ бухгалтерия акт сверкаси чиқади.",
+        "Тасдиқласангиз, контрагентлар автоматик «Ҳамкорлар» базасига қўшилади ва акт сверкада ишлатилади.",
     ]
     return "\n".join(lines)
 
 
 def install_bot_enhancements(bot_module):
-    menu_labels = {
-        "📎 Ҳужжат юклаш", "🤖 AI таҳлил", "👥 Ҳамкорлар", "📄 Шартномалар",
-        "📦 Хом ашё омбори", "📥 Кирим", "🧾 Чиқиш фактура", "📊 Ҳисоботлар",
-        "🧮 Акт сверка", "ℹ️ Ёрдам",
-    }
-
     bot_module.MENU = ReplyKeyboardMarkup(
         [
             ["📎 Ҳужжат юклаш", "🤖 AI таҳлил"],
@@ -210,8 +271,15 @@ def install_bot_enhancements(bot_module):
         resize_keyboard=True,
     )
 
+    menu_labels = {button for row in bot_module.MENU.keyboard for button in row}
     original_text_handler = bot_module.text_handler
     original_confirm_callback = bot_module.confirm_callback
+    original_analysis_text = bot_module.analysis_text
+
+    def enhanced_analysis_text(data):
+        if isinstance(data, dict) and data.get("document_type") == "invoice_registry":
+            return invoice_registry_text(data)
+        return original_analysis_text(data)
 
     async def enhanced_text_handler(update, context):
         text = (update.message.text or "").strip()
@@ -223,12 +291,13 @@ def install_bot_enhancements(bot_module):
             ) if rows else "Ҳозирча ҳамкорлар йўқ."
             await update.message.reply_text(
                 f"👥 Ҳамкорлар:\n\n{body}\n\n"
-                "✅ Ҳамкорлар банк выпискаси ва тасдиқланган ҳужжатлардан автоматик қўшилади."
+                "✅ Ҳамкорлар банк выпискаси, фактура реестри ва тасдиқланган ҳужжатлардан автоматик қўшилади.",
+                reply_markup=bot_module.MENU,
             )
             return
 
         if text == "🧮 Акт сверка":
-            rows = list_partners(limit=30)
+            rows = list_partners(limit=50)
             body = "\n".join(f"• {p.name}" for p in rows) if rows else "Ҳозирча ҳамкорлар йўқ."
             context.user_data["awaiting_reconciliation_partner"] = True
             await update.message.reply_text(
@@ -249,6 +318,9 @@ def install_bot_enhancements(bot_module):
             await update.message.reply_text(reconciliation_for_partner(text))
             return
 
+        if context.user_data.get("awaiting_reconciliation_partner") and text in menu_labels:
+            context.user_data.pop("awaiting_reconciliation_partner", None)
+
         await original_text_handler(update, context)
 
     async def enhanced_confirm_callback(update, context):
@@ -265,5 +337,6 @@ def install_bot_enhancements(bot_module):
                     f"👥 Ҳамкорлар автоматик синхронланди: {count} та."
                 )
 
+    bot_module.analysis_text = enhanced_analysis_text
     bot_module.text_handler = enhanced_text_handler
     bot_module.confirm_callback = enhanced_confirm_callback
