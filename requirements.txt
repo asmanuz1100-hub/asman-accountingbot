@@ -1,3 +1,4 @@
 python-telegram-bot[webhooks]>=22,<23
 SQLAlchemy>=2.0,<3
 psycopg[binary]>=3,<4
+python-calamine>=0.8,<1
