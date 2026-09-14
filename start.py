@@ -5,9 +5,11 @@ os.environ.pop("WEBHOOK_SECRET", None)
 
 # Patch spreadsheet analysis before bot import.
 import excel_docs
+import enhancements
 from asaka_excel import try_analyze_asaka
 from enhancements import enrich_bank_data, install_bot_enhancements
 from invoice_registry import try_analyze_invoice_registry
+from reconciliation_persistence import install_reconciliation_persistence
 
 _original_analyze_spreadsheet = excel_docs.analyze_spreadsheet_bytes
 
@@ -29,6 +31,7 @@ excel_docs.analyze_spreadsheet_bytes = _analyze_spreadsheet
 import bot as bot_module
 
 install_bot_enhancements(bot_module)
+install_reconciliation_persistence(bot_module, enhancements)
 
 main = bot_module.main
 
