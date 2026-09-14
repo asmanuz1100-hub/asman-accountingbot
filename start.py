@@ -10,6 +10,7 @@ from asaka_excel import try_analyze_asaka
 from enhancements import enrich_bank_data, install_bot_enhancements
 from invoice_registry import try_analyze_invoice_registry
 from reconciliation_persistence import install_reconciliation_persistence
+from reconciliation_ui import install_reconciliation_ui
 
 _original_analyze_spreadsheet = excel_docs.analyze_spreadsheet_bytes
 
@@ -32,6 +33,7 @@ import bot as bot_module
 
 install_bot_enhancements(bot_module)
 install_reconciliation_persistence(bot_module, enhancements)
+install_reconciliation_ui(bot_module)
 
 main = bot_module.main
 
