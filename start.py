@@ -11,9 +11,16 @@ reset_business_data_once()
 # Patch spreadsheet analysis before bot import.
 import excel_docs
 import enhancements
+import menu_customization
 import reconciliation_persistence
 import reconciliation_ui
+import stable_reconciliation
 from asaka_excel import try_analyze_asaka
+from business_controls import (
+    enrich_registry_accounts,
+    install_business_core,
+    install_business_ui,
+)
 from enhancements import enrich_bank_data, install_bot_enhancements
 from incoming_invoice_support import (
     install_incoming_invoice_support,
@@ -33,12 +40,12 @@ _original_analyze_spreadsheet = excel_docs.analyze_spreadsheet_bytes
 def _analyze_spreadsheet(data: bytes, filename: str = "statement.xlsx") -> dict:
     registry_result = try_analyze_invoice_registry_v2(data, filename)
     if registry_result is not None:
-        return registry_result
+        return enrich_registry_accounts(data, filename, registry_result)
 
     # Backward-compatible fallback for other electronic-document registry variants.
     registry_result = try_analyze_invoice_registry(data, filename)
     if registry_result is not None:
-        return registry_result
+        return enrich_registry_accounts(data, filename, registry_result)
 
     result = try_analyze_asaka(data, filename)
     if result is None:
@@ -56,9 +63,16 @@ install_menu_customization(bot_module)
 install_incoming_invoice_support(bot_module)
 install_reconciliation_persistence(bot_module, enhancements)
 install_stable_reconciliation(reconciliation_persistence, enhancements)
+install_business_core(
+    stable_reconciliation,
+    reconciliation_persistence,
+    enhancements,
+    menu_customization,
+)
 install_saldo_fix(enhancements)
 reconciliation_ui.build_reconciliation_pdf = build_reconciliation_pdf_v2
 install_reconciliation_ui(bot_module)
+install_business_ui(bot_module, reconciliation_ui, enhancements)
 
 main = bot_module.main
 
