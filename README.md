@@ -1,11 +1,12 @@
-# ASMAN Accounting AI Bot v2
+# Accounting & Sales AI Bot
 
-Telegram учун ASMAN SILICAT бухгалтерия ва AI ҳужжат таҳлил боти.
+Telegram учун бухгалтерия, савдо ва AI ҳужжат таҳлил боти.
 
 ## Ҳозир тайёр функциялар
 
 - PDF ҳужжатни ўқиш ва AI таҳлил
 - JPG / JPEG / PNG / WEBP расмни ўқиш ва AI таҳлил
+- XLS / XLSX банк выпискаларини ўқиш ва таҳлил
 - Ҳужжат турини аниқлаш
 - Контрагент, СТИР, шартнома/фактура рақами, сана, валюта, ҚҚС, умумий сумма ва товар позицияларини ажратиш
 - Шубҳали фарқлар бўйича огоҳлантириш
@@ -13,8 +14,9 @@ Telegram учун ASMAN SILICAT бухгалтерия ва AI ҳужжат та
 - Ҳужжат фақат тасдиқдан кейин базага сақланади
 - Ҳамкорлар
 - Шартномалар ва шартнома қолдиғи
-- Фақат хом ашё омбори
+- Хом ашё омбори
 - Хом ашё кирими
+- Савдо ва чиқиш фактура модули учун база
 - Қисқа ҳисобот
 
 ## Хавфсизлик
@@ -23,9 +25,9 @@ Telegram учун ASMAN SILICAT бухгалтерия ва AI ҳужжат та
 
 ## База
 
-Код `DATABASE_URL` берилса PostgreSQL'дан фойдаланади. `DATABASE_URL` бўлмаса локал тест учун SQLite (`asman.db`) ишлайди.
+Код `DATABASE_URL` берилса PostgreSQL'дан фойдаланади. `DATABASE_URL` бўлмаса локал тест учун SQLite ишлайди.
 
-Render'да бухгалтерия маълумотларини доимий сақлаш учун PostgreSQL ёки бошқа ташқи доимий база улаш керак. Render Free Web Service локал диски доимий база сифатида ишончли эмас.
+Render'да бухгалтерия маълумотларини доимий сақлаш учун PostgreSQL ёки бошқа ташқи доимий база улаш керак.
 
 ## Render
 
@@ -38,21 +40,16 @@ pip install -r requirements.txt
 Start command:
 
 ```bash
-python bot.py
+python start.py
 ```
 
 Environment Variables:
 
 - `BOT_TOKEN` — BotFather токени
 - `OPENAI_API_KEY` — OpenAI API калити
-- `OPENAI_MODEL` — `gpt-5.6-luna`
+- `OPENAI_MODEL` — AI модели
 - `RUN_MODE` — `webhook`
 - `DATABASE_URL` — PostgreSQL connection string
-- `WEBHOOK_SECRET` — махфий тасодифий қиймат
-
-Render одатда `RENDER_EXTERNAL_URL` ни ўзи беради. Агар берилмаса:
-
-- `WEBHOOK_BASE_URL=https://YOUR-SERVICE.onrender.com`
 
 ## Локал тест
 
@@ -70,5 +67,6 @@ python bot.py
 3. Шартнома лимити етарли эмаслиги ҳақида огоҳлантириш
 4. PDF фактура яратиш
 5. Хом ашё киримини ҳужжатдан бир босишда омборга қабул қилиш
-6. Excel/PDF ҳисобот
-7. Фойдаланувчи роллари ва аудит журнали
+6. Савдо ҳисоботлари
+7. Excel/PDF ҳисобот
+8. Фойдаланувчи роллари ва аудит журнали
