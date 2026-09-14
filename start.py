@@ -6,9 +6,15 @@ os.environ.pop("WEBHOOK_SECRET", None)
 # Patch spreadsheet analysis before bot import.
 import excel_docs
 import enhancements
+import reconciliation_persistence
 import reconciliation_ui
 from asaka_excel import try_analyze_asaka
 from enhancements import enrich_bank_data, install_bot_enhancements
+from incoming_invoice_support import (
+    install_incoming_invoice_support,
+    patch_reconciliation_collection,
+    try_analyze_invoice_registry_v2,
+)
 from invoice_registry import try_analyze_invoice_registry
 from menu_customization import install_menu_customization
 from reconciliation_pdf_v2 import build_reconciliation_pdf_v2
@@ -20,6 +26,11 @@ _original_analyze_spreadsheet = excel_docs.analyze_spreadsheet_bytes
 
 
 def _analyze_spreadsheet(data: bytes, filename: str = "statement.xlsx") -> dict:
+    registry_result = try_analyze_invoice_registry_v2(data, filename)
+    if registry_result is not None:
+        return registry_result
+
+    # Backward-compatible fallback if a registry variant is not recognized by v3.
     registry_result = try_analyze_invoice_registry(data, filename)
     if registry_result is not None:
         return registry_result
@@ -37,7 +48,9 @@ import bot as bot_module
 
 install_bot_enhancements(bot_module)
 install_menu_customization(bot_module)
+install_incoming_invoice_support(bot_module)
 install_reconciliation_persistence(bot_module, enhancements)
+patch_reconciliation_collection(reconciliation_persistence)
 install_saldo_fix(enhancements)
 reconciliation_ui.build_reconciliation_pdf = build_reconciliation_pdf_v2
 install_reconciliation_ui(bot_module)
