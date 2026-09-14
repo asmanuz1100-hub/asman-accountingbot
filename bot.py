@@ -1,7 +1,5 @@
 import logging
 import os
-import tempfile
-from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup, Update
 from telegram.ext import (
@@ -14,6 +12,7 @@ from telegram.ext import (
 )
 
 from ai_docs import analyze_image_bytes, analyze_pdf_bytes
+from excel_docs import analyze_spreadsheet_bytes
 from database import (
     add_contract,
     add_material,
@@ -62,6 +61,61 @@ def money(value):
 
 
 def analysis_text(data: dict) -> str:
+    if data.get("document_type") == "bank_statement":
+        period = data.get("statement_period") or {}
+        warnings = data.get("warnings") or []
+        counterparties = data.get("top_counterparties") or []
+        transactions = data.get("transactions_preview") or []
+
+        lines = [
+            "🏦 БАНК ВЫПИСКАСИ — AI ТАҲЛИЛ",
+            "",
+            f"Банк: {data.get('bank_name') or '—'}",
+            f"Ҳисоб эгаси: {data.get('account_holder') or '—'}",
+            f"Ҳисоб рақами: {data.get('account_number') or '—'}",
+            f"Давр: {period.get('from') or '—'} — {period.get('to') or '—'}",
+            f"Валюта: {data.get('currency') or '—'}",
+            f"Бошланғич қолдиқ: {money(data.get('opening_balance'))}",
+            f"📥 Жами кирим: {money(data.get('total_incoming'))}",
+            f"📤 Жами чиқим: {money(data.get('total_outgoing'))}",
+            f"Якуний қолдиқ: {money(data.get('closing_balance'))}",
+            f"Операциялар: {data.get('operations_count') or 0} та",
+        ]
+
+        if counterparties:
+            lines += ["", "👥 Асосий контрагентлар:"]
+            for item in counterparties[:8]:
+                lines.append(
+                    f"• {item.get('name') or '—'} | "
+                    f"кирим {money(item.get('incoming'))} | "
+                    f"чиқим {money(item.get('outgoing'))}"
+                )
+
+        if transactions:
+            lines += ["", "🔎 Операциялардан намуна:"]
+            for item in transactions[:6]:
+                lines.append(
+                    f"• {item.get('date') or '—'} | "
+                    f"{item.get('counterparty') or '—'} | "
+                    f"+{money(item.get('incoming'))} / -{money(item.get('outgoing'))}"
+                )
+
+        if data.get("summary"):
+            lines += ["", "📝 Хулоса:", str(data["summary"])]
+
+        if warnings:
+            lines += ["", "⚠️ Текшириш керак:"]
+            lines += [f"• {w}" for w in warnings[:10]]
+        else:
+            lines += ["", "✅ AI жиддий огоҳлантириш аниқламади."]
+
+        lines += [
+            "",
+            "Выписка таҳлили базага ҳали сақланмади.",
+            "Текшириб, кейин «✅ Тасдиқлаш»ни босинг.",
+        ]
+        return "\n".join(lines)
+
     partner = data.get("partner") or {}
     warnings = data.get("warnings") or []
     items = data.get("items") or []
@@ -113,7 +167,8 @@ def analysis_text(data: dict) -> str:
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "🏢 ASMAN БУХГАЛТЕРИЯ AI\n\n"
-        "PDF ёки расм ташласангиз, бот ҳужжатни ўқийди ва таҳлил қилади.\n"
+        "PDF, расм ёки Excel (XLS/XLSX) ташласангиз, бот ҳужжатни ўқийди ва таҳлил қилади.\n"
+        "Excel банк выпискасини ҳам автоматик таҳлил қилади.\n"
         "Маълумот фақат сиз тасдиқлагандан кейин базага сақланади.",
         reply_markup=MENU,
     )
@@ -122,7 +177,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "ℹ️ ҚИСҚА ЙЎРИҚНОМА\n\n"
-        "📎 PDF/JPG/PNG юборинг — AI реквизит, сумма, ҚҚС ва товарларни ажратади.\n\n"
+        "📎 PDF/JPG/PNG/XLS/XLSX юборинг — AI ҳужжатни таҳлил қилади.\n"
+        "🏦 Банк выпискаси XLS/XLSX бўлса, кирим, чиқим, қолдиқ ва контрагентларни ҳисоблайди.\n\n"
         "📥 Хом ашё кирими:\n+ Акрил | 500 | kg\n\n"
         "👥 Ҳамкор қўшиш:\nҳамкор: Компания номи\n\n"
         "📄 Шартнома қўшиш:\n"
@@ -136,8 +192,8 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if text in ("📎 Ҳужжат юклаш", "🤖 AI таҳлил"):
         await update.message.reply_text(
-            "📎 PDF, JPG/JPEG ёки PNG файлни шу чатга юборинг.\n"
-            "AI уни ўқиб, бухгалтерия нуқтаи назаридан таҳлил қилади."
+            "📎 PDF, JPG/JPEG, PNG ёки Excel XLS/XLSX файлни шу чатга юборинг.\n"
+            "🏦 Банк выпискаси Excel бўлса, AI кирим-чиқим ва қолдиқни ҳам таҳлил қилади."
         )
         return
 
@@ -267,22 +323,47 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     doc = update.message.document
     mime = (doc.mime_type or "").lower()
     filename = doc.file_name or "document"
+    lower_name = filename.lower()
 
     if doc.file_size and doc.file_size > MAX_FILE_MB * 1024 * 1024:
         await update.message.reply_text(f"❌ Файл жуда катта. Лимит: {MAX_FILE_MB} MB.")
         return
 
-    is_pdf = mime == "application/pdf" or filename.lower().endswith(".pdf")
-    is_image = mime.startswith("image/") or filename.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
-    if not (is_pdf or is_image):
-        await update.message.reply_text("❌ Ҳозирча PDF, JPG/JPEG, PNG ва WEBP қабул қиламан.")
+    is_pdf = mime == "application/pdf" or lower_name.endswith(".pdf")
+    is_image = mime.startswith("image/") or lower_name.endswith((".jpg", ".jpeg", ".png", ".webp"))
+    is_excel = lower_name.endswith((".xls", ".xlsx", ".xlsm", ".xlsb", ".ods")) or mime in {
+        "application/vnd.ms-excel",
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "application/vnd.ms-excel.sheet.macroenabled.12",
+        "application/vnd.ms-excel.sheet.binary.macroenabled.12",
+        "application/vnd.oasis.opendocument.spreadsheet",
+    }
+
+    if not (is_pdf or is_image or is_excel):
+        await update.message.reply_text(
+            "❌ Ҳозирча PDF, JPG/JPEG, PNG, WEBP ва Excel "
+            "XLS/XLSX/XLSM/XLSB/ODS қабул қиламан."
+        )
         return
 
-    status = await update.message.reply_text("⏳ Ҳужжатни юклаб, AI билан таҳлил қиляпман...")
+    if is_excel:
+        status_text = "⏳ Excel банк выпискасини ўқиб, кирим-чиқимни таҳлил қиляпман..."
+    else:
+        status_text = "⏳ Ҳужжатни юклаб, AI билан таҳлил қиляпман..."
+
+    status = await update.message.reply_text(status_text)
+
     try:
         tg_file = await context.bot.get_file(doc.file_id)
         raw = bytes(await tg_file.download_as_bytearray())
-        data = analyze_pdf_bytes(raw, filename) if is_pdf else analyze_image_bytes(raw, mime or "image/jpeg")
+
+        if is_excel:
+            data = analyze_spreadsheet_bytes(raw, filename)
+        elif is_pdf:
+            data = analyze_pdf_bytes(raw, filename)
+        else:
+            data = analyze_image_bytes(raw, mime or "image/jpeg")
+
         await status.edit_text("✅ Таҳлил тайёр.")
         await show_analysis(update, context, data, doc.file_id, filename, mime)
     except Exception as exc:
