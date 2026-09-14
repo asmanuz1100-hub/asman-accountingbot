@@ -1,11 +1,10 @@
 import json
-from collections import defaultdict
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 from telegram import ReplyKeyboardMarkup
 
-from asaka_excel import _Parser, _counterparty, _date, _decode, _num
+from asaka_excel import _Parser, _date, _decode, _num, _split_party
 from database import Document, engine, list_partners, upsert_partner
 
 
@@ -39,14 +38,19 @@ def enrich_bank_data(raw: bytes, filename: str, data: dict) -> dict:
                 tx_date = _date(row[0])
                 if not tx_date:
                     continue
+
                 outgoing = round(_num(row[5]), 2)
                 incoming = round(_num(row[6]), 2)
                 if incoming == 0 and outgoing == 0:
                     continue
+
+                account, tin, name = _split_party(row[1])
                 transactions.append({
                     "date": tx_date,
-                    "counterparty": _counterparty(row[1]),
-                    "purpose": str(row[7] or "").strip()[:1000] or None,
+                    "counterparty": name,
+                    "counterparty_account": account,
+                    "counterparty_tin": tin,
+                    "purpose": str(row[7] or "").strip()[:1500] or None,
                     "incoming": incoming,
                     "outgoing": outgoing,
                 })
@@ -55,18 +59,20 @@ def enrich_bank_data(raw: bytes, filename: str, data: dict) -> dict:
 
     if not transactions:
         transactions = list(data.get("transactions_preview") or [])
+
     data["transactions"] = transactions
     return data
 
 
 def _partner_names_from_data(data: dict) -> list[tuple[str, str | None]]:
-    found = {}
+    found: dict[str, tuple[str, str | None]] = {}
 
     partner = data.get("partner") or {}
     if isinstance(partner, dict) and partner.get("name"):
         name = " ".join(str(partner["name"]).split()).strip()
         if name:
-            found[_norm_name(name)] = (name[:255], partner.get("tin"))
+            tin = partner.get("tin")
+            found[_norm_name(name)] = (name[:255], str(tin).strip() if tin else None)
 
     if data.get("document_type") == "bank_statement":
         own_name = _norm_name(data.get("account_holder"))
@@ -75,7 +81,12 @@ def _partner_names_from_data(data: dict) -> list[tuple[str, str | None]]:
             norm = _norm_name(name)
             if not name or norm == own_name or len(norm) < 3:
                 continue
-            if any(bad in norm for bad in ("итоговый оборот", "остаток на", "оборот дебет", "оборот кредит")):
+            if any(bad in norm for bad in (
+                "итоговый оборот",
+                "остаток на",
+                "оборот дебет",
+                "оборот кредит",
+            )):
                 continue
             tin = tx.get("counterparty_tin")
             found[norm] = (name[:255], str(tin).strip() if tin else None)
@@ -99,12 +110,14 @@ def _partner_names_from_data(data: dict) -> list[tuple[str, str | None]]:
 
 def sync_partners_from_data(data: dict) -> int:
     partners = _partner_names_from_data(data)
+    saved = 0
     for name, tin in partners:
         try:
             upsert_partner(name, tin=tin, partner_type="auto")
+            saved += 1
         except Exception:
             continue
-    return len(partners)
+    return saved
 
 
 def _matches_partner(candidate: str, requested: str) -> bool:
@@ -125,7 +138,9 @@ def reconciliation_for_partner(partner_name: str) -> str:
 
     with Session(engine) as session:
         docs = session.scalars(
-            select(Document).where(Document.document_type.in_(["bank_statement", "invoice_registry"])).order_by(Document.id)
+            select(Document)
+            .where(Document.document_type.in_(["bank_statement", "invoice_registry"]))
+            .order_by(Document.id)
         ).all()
 
     for doc in docs:
@@ -139,13 +154,25 @@ def reconciliation_for_partner(partner_name: str) -> str:
                 cp = str(tx.get("counterparty") or "").strip()
                 if not _matches_partner(cp, partner_name):
                     continue
+
                 incoming = round(float(tx.get("incoming") or 0), 2)
                 outgoing = round(float(tx.get("outgoing") or 0), 2)
-                key = (str(tx.get("date") or ""), _norm_name(cp), str(tx.get("purpose") or "").strip(), incoming, outgoing)
+                key = (
+                    str(tx.get("date") or ""),
+                    _norm_name(cp),
+                    str(tx.get("purpose") or "").strip(),
+                    incoming,
+                    outgoing,
+                )
                 if key in seen_bank:
                     continue
                 seen_bank.add(key)
-                bank_rows.append({"date": key[0], "incoming": incoming, "outgoing": outgoing, "purpose": key[2]})
+                bank_rows.append({
+                    "date": key[0],
+                    "incoming": incoming,
+                    "outgoing": outgoing,
+                    "purpose": key[2],
+                })
 
         elif data.get("document_type") == "invoice_registry":
             for inv in data.get("invoices") or []:
@@ -154,12 +181,13 @@ def reconciliation_for_partner(partner_name: str) -> str:
                     continue
                 if inv.get("status_group") != "signed":
                     continue
+
                 amount = round(float(inv.get("total") or 0), 2)
                 key = (
                     str(inv.get("document_number") or ""),
                     str(inv.get("document_date") or ""),
                     _norm_name(cp),
-                    inv.get("direction"),
+                    str(inv.get("direction") or ""),
                     amount,
                 )
                 if key in seen_invoice:
@@ -168,7 +196,7 @@ def reconciliation_for_partner(partner_name: str) -> str:
                 invoice_rows.append({
                     "number": key[0],
                     "date": key[1],
-                    "direction": inv.get("direction"),
+                    "direction": key[3],
                     "amount": amount,
                 })
 
@@ -215,7 +243,10 @@ def reconciliation_for_partner(partner_name: str) -> str:
         lines += ["", "Сўнгги фактуралар:"]
         for inv in sorted(invoice_rows, key=lambda x: x.get("date") or "")[-7:]:
             direction = "сотув" if inv["direction"] == "outgoing" else "харид"
-            lines.append(f"• {inv.get('date') or '—'} | №{inv.get('number') or '—'} | {direction} | {_money(inv['amount'])}")
+            lines.append(
+                f"• {inv.get('date') or '—'} | №{inv.get('number') or '—'} | "
+                f"{direction} | {_money(inv['amount'])}"
+            )
 
     return "\n".join(lines)
 
@@ -224,6 +255,7 @@ def invoice_registry_text(data: dict) -> str:
     period = data.get("statement_period") or {}
     warnings = data.get("warnings") or []
     counterparties = data.get("counterparties") or []
+
     lines = [
         "🧾 ФАКТУРАЛАР РЕЕСТРИ — ТАҲЛИЛ",
         "",
@@ -254,7 +286,8 @@ def invoice_registry_text(data: dict) -> str:
 
     lines += [
         "",
-        "Тасдиқласангиз, контрагентлар автоматик «Ҳамкорлар» базасига қўшилади ва акт сверкада ишлатилади.",
+        "👥 Контрагентлар автоматик «Ҳамкорлар» базасига қўшилди.",
+        "Ҳужжатнинг ўзи базага фақат «✅ Тасдиқлаш» босилганда сақланади.",
     ]
     return "\n".join(lines)
 
@@ -273,13 +306,22 @@ def install_bot_enhancements(bot_module):
 
     menu_labels = {button for row in bot_module.MENU.keyboard for button in row}
     original_text_handler = bot_module.text_handler
-    original_confirm_callback = bot_module.confirm_callback
     original_analysis_text = bot_module.analysis_text
+    original_show_analysis = bot_module.show_analysis
 
     def enhanced_analysis_text(data):
         if isinstance(data, dict) and data.get("document_type") == "invoice_registry":
             return invoice_registry_text(data)
         return original_analysis_text(data)
+
+    async def enhanced_show_analysis(update, context, data, telegram_file_id, filename, mime_type):
+        count = sync_partners_from_data(data) if isinstance(data, dict) else 0
+        await original_show_analysis(update, context, data, telegram_file_id, filename, mime_type)
+        if count:
+            await update.effective_message.reply_text(
+                f"👥 Ҳамкорлар автоматик қўшилди/янгиланди: {count} та.",
+                reply_markup=bot_module.MENU,
+            )
 
     async def enhanced_text_handler(update, context):
         text = (update.message.text or "").strip()
@@ -291,7 +333,7 @@ def install_bot_enhancements(bot_module):
             ) if rows else "Ҳозирча ҳамкорлар йўқ."
             await update.message.reply_text(
                 f"👥 Ҳамкорлар:\n\n{body}\n\n"
-                "✅ Ҳамкорлар банк выпискаси, фактура реестри ва тасдиқланган ҳужжатлардан автоматик қўшилади.",
+                "✅ Ҳамкорлар банк выпискаси, фактура реестри ва ҳужжатлардан автоматик қўшилади.",
                 reply_markup=bot_module.MENU,
             )
             return
@@ -303,7 +345,8 @@ def install_bot_enhancements(bot_module):
             await update.message.reply_text(
                 "🧮 АКТ СВЕРКА\n\n"
                 f"Ҳамкорлар:\n{body}\n\n"
-                "Акт чиқариш учун ҳамкор номини ёзинг."
+                "Акт чиқариш учун ҳамкор номини ёзинг.",
+                reply_markup=bot_module.MENU,
             )
             return
 
@@ -323,20 +366,6 @@ def install_bot_enhancements(bot_module):
 
         await original_text_handler(update, context)
 
-    async def enhanced_confirm_callback(update, context):
-        pending = context.user_data.get("pending_doc")
-        data = dict(pending.get("data") or {}) if pending else None
-        is_confirm = bool(update.callback_query and update.callback_query.data == "doc_confirm")
-
-        await original_confirm_callback(update, context)
-
-        if is_confirm and data:
-            count = sync_partners_from_data(data)
-            if count:
-                await update.callback_query.message.reply_text(
-                    f"👥 Ҳамкорлар автоматик синхронланди: {count} та."
-                )
-
     bot_module.analysis_text = enhanced_analysis_text
+    bot_module.show_analysis = enhanced_show_analysis
     bot_module.text_handler = enhanced_text_handler
-    bot_module.confirm_callback = enhanced_confirm_callback
