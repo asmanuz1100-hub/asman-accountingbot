@@ -7,11 +7,16 @@ os.environ.pop("WEBHOOK_SECRET", None)
 import excel_docs
 from asaka_excel import try_analyze_asaka
 from enhancements import enrich_bank_data, install_bot_enhancements
+from invoice_registry import try_analyze_invoice_registry
 
 _original_analyze_spreadsheet = excel_docs.analyze_spreadsheet_bytes
 
 
 def _analyze_spreadsheet(data: bytes, filename: str = "statement.xlsx") -> dict:
+    registry_result = try_analyze_invoice_registry(data, filename)
+    if registry_result is not None:
+        return registry_result
+
     result = try_analyze_asaka(data, filename)
     if result is None:
         result = _original_analyze_spreadsheet(data, filename)
