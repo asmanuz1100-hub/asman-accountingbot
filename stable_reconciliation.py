@@ -1,6 +1,5 @@
 import json
 import re
-from collections import defaultdict
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -27,28 +26,15 @@ def _num(value):
         return 0.0
 
 
-def _strong_identity(party):
-    tin = _norm_tin((party or {}).get("tin"))
-    account = _norm_account((party or {}).get("account"))
-    if tin:
-        return ("tin", tin)
-    if account:
-        return ("account", account)
-    return ("name", _norm_name((party or {}).get("name")))
-
-
 def _same_party(a, b):
     a = a or {}
     b = b or {}
     a_tin, b_tin = _norm_tin(a.get("tin")), _norm_tin(b.get("tin"))
     a_acc, b_acc = _norm_account(a.get("account")), _norm_account(b.get("account"))
-
     if a_tin and b_tin:
         return a_tin == b_tin
     if a_acc and b_acc:
         return a_acc == b_acc
-
-    # Name is only a fallback when neither side has a legal/bank identifier.
     if not (a_tin or b_tin or a_acc or b_acc):
         return bool(_norm_name(a.get("name"))) and _norm_name(a.get("name")) == _norm_name(b.get("name"))
     return False
@@ -60,13 +46,10 @@ def _candidate_matches(name, tin, account, target):
     cand_acc = _norm_account(account)
     target_tin = _norm_tin(target.get("tin"))
     target_acc = _norm_account(target.get("account"))
-
     if cand_tin and target_tin:
         return cand_tin == target_tin
     if cand_acc and target_acc:
         return cand_acc == target_acc
-
-    # Never fuzzy-match names where one side has a strong identifier.
     if cand_tin or cand_acc or target_tin or target_acc:
         return False
     return _norm_name(name) == _norm_name(target.get("name"))
@@ -79,10 +62,7 @@ def _is_real_invoice(inv):
         return False
     if _num(inv.get("total")) <= 0:
         return False
-
     doc_type = _norm_name(inv.get("document_type_name")).replace("ё", "е")
-    # Positive match first: "Ҳисоб-фактура актсиз" contains the word "акт",
-    # so broad exclusion by "акт" would incorrectly remove genuine invoices.
     invoice_tokens = (
         "ҳисоб-фактура",
         "хисоб-фактура",
@@ -98,11 +78,8 @@ def _add_party(parties, name, tin=None, account=None, flow=None):
         "name": " ".join(str(name or "").split()).strip()[:255] or "Номсиз ҳамкор",
         "tin": _norm_tin(tin) or None,
         "account": _norm_account(account) or None,
-        "flows": set([flow]) if flow in ("incoming", "outgoing") else set(),
+        "flows": {flow} if flow in ("incoming", "outgoing") else set(),
     }
-    if not item["tin"] and not item["account"] and not _norm_name(item["name"]):
-        return
-
     for existing in parties:
         if _same_party(existing, item):
             if not existing.get("tin") and item.get("tin"):
@@ -129,13 +106,11 @@ def partner_groups():
     parties = []
     seen_bank = set()
     seen_invoice = set()
-
     for doc in _source_documents():
         try:
             data = json.loads(doc.raw_json or "{}")
         except Exception:
             continue
-
         if data.get("document_type") == "bank_statement":
             for tx in data.get("transactions") or data.get("transactions_preview") or []:
                 incoming = round(_num(tx.get("incoming")), 2)
@@ -154,15 +129,13 @@ def partner_groups():
                 if sig in seen_bank:
                     continue
                 seen_bank.add(sig)
-                flow = "outgoing" if incoming > 0 else "incoming"
                 _add_party(
                     parties,
                     tx.get("counterparty"),
                     tx.get("counterparty_tin"),
                     tx.get("counterparty_account"),
-                    flow,
+                    "outgoing" if incoming > 0 else "incoming",
                 )
-
         elif data.get("document_type") == "invoice_registry":
             for inv in data.get("invoices") or []:
                 if not _is_real_invoice(inv):
@@ -185,15 +158,8 @@ def partner_groups():
                     inv.get("counterparty_account"),
                     inv.get("direction"),
                 )
-
-    outgoing = sorted(
-        [p for p in parties if "outgoing" in p["flows"]],
-        key=lambda p: ((p.get("name") or "").casefold(), p.get("tin") or "", p.get("account") or ""),
-    )
-    incoming = sorted(
-        [p for p in parties if "incoming" in p["flows"]],
-        key=lambda p: ((p.get("name") or "").casefold(), p.get("tin") or "", p.get("account") or ""),
-    )
+    outgoing = sorted([p for p in parties if "outgoing" in p["flows"]], key=lambda p: (p.get("name") or "").casefold())
+    incoming = sorted([p for p in parties if "incoming" in p["flows"]], key=lambda p: (p.get("name") or "").casefold())
     return outgoing, incoming
 
 
@@ -201,28 +167,22 @@ def resolve_partner(identifier):
     raw = " ".join(str(identifier or "").split()).strip()
     if not raw:
         return None
-
     outgoing, incoming = partner_groups()
     parties = []
     for party in outgoing + incoming:
         if not any(_same_party(party, old) for old in parties):
             parties.append(party)
-
     digits = re.sub(r"\D", "", raw)
     account_text = _norm_account(raw)
-
     tin_matches = [p for p in parties if _norm_tin(p.get("tin")) and _norm_tin(p.get("tin")) in digits]
     if len(tin_matches) == 1:
         return tin_matches[0]
-
     acc_matches = [p for p in parties if _norm_account(p.get("account")) and _norm_account(p.get("account")) in account_text]
     if len(acc_matches) == 1:
         return acc_matches[0]
-
     exact_name = [p for p in parties if _norm_name(p.get("name")) == _norm_name(raw)]
     if len(exact_name) == 1:
         return exact_name[0]
-
     partial = [p for p in parties if _norm_name(raw) and _norm_name(raw) in _norm_name(p.get("name"))]
     if len(partial) == 1:
         return partial[0]
@@ -234,20 +194,14 @@ def collect_reconciliation(identifier, flow=None):
     target = resolve_partner(identifier)
     if not target:
         return None
-
-    bank_rows = []
-    invoice_rows = []
-    entries = []
-    seen_bank = set()
-    seen_invoice = set()
+    bank_rows, invoice_rows, entries = [], [], []
+    seen_bank, seen_invoice = set(), set()
     own_company = {}
-
     for doc in _source_documents():
         try:
             data = json.loads(doc.raw_json or "{}")
         except Exception:
             continue
-
         if data.get("document_type") == "bank_statement":
             if not own_company:
                 own_company = {
@@ -255,16 +209,9 @@ def collect_reconciliation(identifier, flow=None):
                     "tin": data.get("tax_id"),
                     "account": data.get("account_number"),
                 }
-
             for tx in data.get("transactions") or data.get("transactions_preview") or []:
-                if not _candidate_matches(
-                    tx.get("counterparty"),
-                    tx.get("counterparty_tin"),
-                    tx.get("counterparty_account"),
-                    target,
-                ):
+                if not _candidate_matches(tx.get("counterparty"), tx.get("counterparty_tin"), tx.get("counterparty_account"), target):
                     continue
-
                 incoming = round(_num(tx.get("incoming")), 2)
                 outgoing = round(_num(tx.get("outgoing")), 2)
                 if flow == "outgoing" and incoming <= 0:
@@ -273,7 +220,6 @@ def collect_reconciliation(identifier, flow=None):
                     continue
                 if incoming <= 0 and outgoing <= 0:
                     continue
-
                 sig = (
                     str(tx.get("date") or ""),
                     _norm_tin(tx.get("counterparty_tin")),
@@ -286,7 +232,6 @@ def collect_reconciliation(identifier, flow=None):
                 if sig in seen_bank:
                     continue
                 seen_bank.add(sig)
-
                 row = {
                     "date": sig[0],
                     "incoming": incoming,
@@ -295,15 +240,17 @@ def collect_reconciliation(identifier, flow=None):
                     "document_number": sig[3] or None,
                 }
                 bank_rows.append(row)
+                bank_label = "Банк тўлови"
+                if row.get("document_number"):
+                    bank_label += f" №{row['document_number']}"
                 entries.append({
                     "date": row["date"],
                     "kind": "bank",
-                    "document": f"Банк тўлови{f' №{row[\"document_number\"]}' if row.get('document_number') else ''}",
+                    "document": bank_label,
                     "basis": row.get("purpose") or "Банк операцияси",
                     "debit": outgoing,
                     "credit": incoming,
                 })
-
         elif data.get("document_type") == "invoice_registry":
             for inv in data.get("invoices") or []:
                 if not _is_real_invoice(inv):
@@ -311,14 +258,8 @@ def collect_reconciliation(identifier, flow=None):
                 direction = str(inv.get("direction") or "")
                 if flow and direction != flow:
                     continue
-                if not _candidate_matches(
-                    inv.get("counterparty"),
-                    inv.get("counterparty_tin"),
-                    inv.get("counterparty_account"),
-                    target,
-                ):
+                if not _candidate_matches(inv.get("counterparty"), inv.get("counterparty_tin"), inv.get("counterparty_account"), target):
                     continue
-
                 amount = round(_num(inv.get("total")), 2)
                 sig = (
                     direction,
@@ -331,7 +272,6 @@ def collect_reconciliation(identifier, flow=None):
                 if sig in seen_invoice:
                     continue
                 seen_invoice.add(sig)
-
                 row = {
                     "number": sig[2],
                     "date": sig[1],
@@ -349,9 +289,7 @@ def collect_reconciliation(identifier, flow=None):
                     "debit": amount if direction == "outgoing" else 0.0,
                     "credit": amount if direction == "incoming" else 0.0,
                 })
-
     entries.sort(key=lambda x: (str(x.get("date") or ""), 0 if x.get("kind") == "invoice" else 1, str(x.get("document") or "")))
-
     payments_from_partner = round(sum(x["incoming"] for x in bank_rows), 2)
     payments_to_partner = round(sum(x["outgoing"] for x in bank_rows), 2)
     sales = round(sum(x["amount"] for x in invoice_rows if x["direction"] == "outgoing"), 2)
@@ -359,20 +297,14 @@ def collect_reconciliation(identifier, flow=None):
     debit_total = round(sum(_num(x.get("debit")) for x in entries), 2)
     credit_total = round(sum(_num(x.get("credit")) for x in entries), 2)
     net = round(debit_total - credit_total, 2)
-
     dates = [str(x.get("date")) for x in entries if x.get("date")]
     period_from = min(dates) if dates else None
     period_to = max(dates) if dates else None
-
     return {
         "document_type": "reconciliation_report",
         "flow": flow,
         "flow_label": "Чиқим / сотув" if flow == "outgoing" else "Кирим / харид" if flow == "incoming" else "Умумий",
-        "partner": {
-            "name": target.get("name"),
-            "tin": target.get("tin"),
-            "account_number": target.get("account"),
-        },
+        "partner": {"name": target.get("name"), "tin": target.get("tin"), "account_number": target.get("account")},
         "own_company": own_company,
         "document_date": period_to,
         "currency": "UZS",
@@ -398,10 +330,7 @@ def collect_reconciliation(identifier, flow=None):
 
 
 def install_stable_reconciliation(reconciliation_module, enhancements_module):
-    # UI partner lists use these dynamic enhancement hooks.
     enhancements_module.reconciliation_partner_groups = partner_groups
     enhancements_module.resolve_reconciliation_party = resolve_partner
     enhancements_module.party_matches_target = _candidate_matches
-
-    # Persistence/summary/PDF now receive one canonical calculation every time.
     reconciliation_module._collect_reconciliation = collect_reconciliation
