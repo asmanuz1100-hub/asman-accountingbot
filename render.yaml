@@ -1,8 +1,9 @@
 services:
   - type: web
-    name: asman-accounting-ai
+    name: asman-accounting-ai-v2
     runtime: python
     plan: free
+    region: oregon
     buildCommand: pip install -r requirements.txt
     startCommand: python bot.py
     envVars:
@@ -15,6 +16,13 @@ services:
       - key: OPENAI_API_KEY
         sync: false
       - key: DATABASE_URL
-        sync: false
+        fromDatabase:
+          name: asman-accounting-db-v2
+          property: connectionString
       - key: WEBHOOK_SECRET
         generateValue: true
+
+databases:
+  - name: asman-accounting-db-v2
+    plan: free
+    region: oregon
