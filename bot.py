@@ -29,7 +29,7 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     level=logging.INFO,
 )
-log = logging.getLogger("asman-accounting-ai")
+log = logging.getLogger("accounting-sales-ai")
 
 TOKEN = os.getenv("BOT_TOKEN")
 MAX_FILE_MB = int(os.getenv("MAX_FILE_MB", "20"))
@@ -166,7 +166,7 @@ def analysis_text(data: dict) -> str:
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "🏢 ASMAN БУХГАЛТЕРИЯ AI\n\n"
+        "📊 БУХГАЛТЕРИЯ ВА САВДО AI\n\n"
         "PDF, расм ёки Excel (XLS/XLSX) ташласангиз, бот ҳужжатни ўқийди ва таҳлил қилади.\n"
         "Excel банк выпискасини ҳам автоматик таҳлил қилади.\n"
         "Маълумот фақат сиз тасдиқлагандан кейин базага сақланади.",
@@ -278,7 +278,7 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if text == "📊 Ҳисоботлар":
         data = report()
         await update.message.reply_text(
-            "📊 ASMAN ҲИСОБОТИ\n\n"
+            "📊 ҲИСОБОТ\n\n"
             f"👥 Ҳамкорлар: {data['partners']}\n"
             f"📄 Шартномалар: {data['contracts']}\n"
             f"📦 Хом ашё турлари: {data['materials']}\n"
@@ -346,11 +346,11 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
         return
 
-    if is_excel:
-        status_text = "⏳ Excel банк выпискасини ўқиб, кирим-чиқимни таҳлил қиляпман..."
-    else:
-        status_text = "⏳ Ҳужжатни юклаб, AI билан таҳлил қиляпман..."
-
+    status_text = (
+        "⏳ Excel банк выпискасини ўқиб, кирим-чиқимни таҳлил қиляпман..."
+        if is_excel
+        else "⏳ Ҳужжатни юклаб, AI билан таҳлил қиляпман..."
+    )
     status = await update.message.reply_text(status_text)
 
     try:
