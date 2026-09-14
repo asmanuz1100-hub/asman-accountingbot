@@ -9,20 +9,28 @@ def _decode(data: bytes) -> str:
         try:
             return data.decode(enc)
         except UnicodeDecodeError:
-            continue
+            pass
     return data.decode("utf-8", errors="replace")
 
 
 class _Parser(HTMLParser):
+    """Tolerant parser for malformed Asakabank HTML/XLS exports."""
+
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.rows = []
         self.row = None
         self.cell = None
 
+    def _flush_row(self):
+        if self.row is not None and any(str(v).strip() for v in self.row):
+            self.rows.append(self.row)
+        self.row = None
+
     def handle_starttag(self, tag, attrs):
         tag = tag.lower()
         if tag == "tr":
+            self._flush_row()
             self.row = []
         elif tag in ("td", "th"):
             self.cell = []
@@ -40,10 +48,10 @@ class _Parser(HTMLParser):
             if self.row is not None:
                 self.row.append(value)
             self.cell = None
-        elif tag == "tr" and self.row is not None:
-            if any(str(v).strip() for v in self.row):
-                self.rows.append(self.row)
-            self.row = None
+        elif tag == "tr":
+            self._flush_row()
+        elif tag in ("thead", "tbody", "table"):
+            self._flush_row()
 
 
 def _num(value):
@@ -77,21 +85,92 @@ def _date(value):
         return None
 
 
-def _amount_from_label(rows, label):
-    for row in rows[:20]:
-        for cell in row:
-            if label in str(cell).lower():
-                m = re.search(r"([-+]?\d[\d \xa0]*(?:[.,]\d+)?)", str(cell))
-                if m:
-                    return _num(m.group(1))
+def _find_header(rows):
+    for i, row in enumerate(rows[:100]):
+        h = [" ".join(str(v).lower().replace("ё", "е").split()) for v in row]
+        def col(*terms):
+            return next((j for j, x in enumerate(h) if any(t in x for t in terms)), None)
+        date_i = col("дата")
+        party_i = col("счет/инн", "cчет/инн", "счёт/инн")
+        debit_i = col("оборот дебет")
+        credit_i = col("оборот кредит")
+        purpose_i = col("назначение платежа")
+        if None not in (date_i, party_i, debit_i, credit_i, purpose_i):
+            return i, {
+                "date": date_i,
+                "party": party_i,
+                "debit": debit_i,
+                "credit": credit_i,
+                "purpose": purpose_i,
+                "doc": col("№ док", "номер док"),
+                "op": col("оп"),
+                "mfo": col("мфо"),
+            }
     return None
 
 
-def _counterparty(raw):
-    parts = str(raw or "").strip().split("/", 2)
-    if len(parts) == 3:
-        return parts[2].strip()[:250] or None
-    return str(raw or "").strip()[:250] or None
+def _label_amount(rows, label):
+    for row in rows[:20]:
+        for cell in row:
+            text = str(cell)
+            if label in text.lower():
+                part = text.split(":", 1)[1] if ":" in text else text
+                return _num(part)
+    return None
+
+
+def _meta(rows, header_index):
+    bank_name = None
+    account_number = None
+    account_holder = None
+    tax_id = None
+    period_from = period_to = None
+
+    for row in rows[:header_index]:
+        joined = " ".join(str(v) for v in row if str(v).strip())
+        low = joined.lower().replace("ё", "е")
+
+        if bank_name is None and "асакабанк" in low:
+            bank_name = next((str(v).strip() for v in row if str(v).strip()), joined)[:250]
+
+        if "сведения о работе счета" in low:
+            m = re.search(
+                r"(?:с|c)\s*(\d{1,2}[./-]\d{1,2}[./-]\d{4})\s*по\s*(\d{1,2}[./-]\d{1,2}[./-]\d{4})",
+                joined,
+                flags=re.I,
+            )
+            if m:
+                period_from, period_to = _date(m.group(1)), _date(m.group(2))
+
+        if ("cчет:" in low or "счет:" in low or "счёт:" in low) and account_number is None:
+            m = re.search(r"(?<!\d)(\d{20})(?!\d)", joined)
+            if m:
+                account_number = m.group(1)
+                tail = joined[m.end():]
+                tail = re.sub(r"\bИНН\s*:\s*\d{7,14}.*$", "", tail, flags=re.I)
+                account_holder = " ".join(tail.split()).strip()[:250] or None
+            mt = re.search(r"\bИНН\s*:\s*(\d{7,14})\b", joined, flags=re.I)
+            if mt:
+                tax_id = mt.group(1)
+
+    return {
+        "bank_name": bank_name or "ASAKABANK",
+        "account_number": account_number,
+        "account_holder": account_holder,
+        "tax_id": tax_id,
+        "period_from": period_from,
+        "period_to": period_to,
+        "opening": _label_amount(rows, "остаток на начало периода"),
+        "closing": _label_amount(rows, "остаток на конец периода"),
+    }
+
+
+def _split_party(value):
+    parts = str(value or "").strip().split("/", 2)
+    account = parts[0].strip() if len(parts) > 0 else None
+    tin = parts[1].strip() if len(parts) > 1 else None
+    name = parts[2].strip() if len(parts) > 2 else str(value or "").strip()
+    return account or None, tin or None, name[:250] or None
 
 
 def try_analyze_asaka(data: bytes, filename: str = "statement.xls"):
@@ -109,60 +188,40 @@ def try_analyze_asaka(data: bytes, filename: str = "statement.xls"):
     if "асакабанк" not in intro and "сведения о работе счета" not in intro:
         return None
 
-    bank_name = rows[0][0].strip() if rows and rows[0] else None
-    account_number = None
-    account_holder = None
-    tax_id = None
-
-    for row in rows[:20]:
-        joined = " ".join(str(v) for v in row if str(v).strip())
-        if account_number is None:
-            m = re.search(r"(?<!\d)(\d{20})(?!\d)", joined.replace(" ", ""))
-            if m:
-                account_number = m.group(1)
-        if tax_id is None:
-            m = re.search(r"(?:ИНН|СТИР)\s*:?\s*(\d{9})", joined, flags=re.I)
-            if m:
-                tax_id = m.group(1)
-        if account_holder is None and account_number and account_number in joined.replace(" ", ""):
-            m = re.search(
-                rf"{re.escape(account_number)}\s+(.+?)(?:\s+ИНН\s*:|\s+СТИР\s*:|$)",
-                joined,
-                flags=re.I,
-            )
-            if m:
-                account_holder = m.group(1).strip()
-
-    period_from = period_to = None
-    for row in rows[:10]:
-        joined = " ".join(str(v) for v in row)
-        m = re.search(
-            r"(?:с|c)\s*(\d{1,2}[./-]\d{1,2}[./-]\d{4})\s*по\s*(\d{1,2}[./-]\d{1,2}[./-]\d{4})",
-            joined,
-            flags=re.I,
-        )
-        if m:
-            period_from, period_to = _date(m.group(1)), _date(m.group(2))
-            break
-
-    opening = _amount_from_label(rows, "остаток на начало периода")
-    closing = _amount_from_label(rows, "остаток на конец периода")
+    header = _find_header(rows)
+    if not header:
+        return None
+    header_index, c = header
+    meta = _meta(rows, header_index)
 
     transactions = []
-    for row in rows:
-        if len(row) < 8:
+    required_max = max(c["date"], c["party"], c["debit"], c["credit"], c["purpose"])
+    for row in rows[header_index + 1:]:
+        if len(row) <= required_max:
             continue
-        tx_date = _date(row[0])
+        tx_date = _date(row[c["date"]])
         if not tx_date:
             continue
-        outgoing = round(_num(row[5]), 2)
-        incoming = round(_num(row[6]), 2)
+
+        outgoing = round(_num(row[c["debit"]]), 2)
+        incoming = round(_num(row[c["credit"]]), 2)
         if outgoing == 0 and incoming == 0:
             continue
+
+        account, tin, name = _split_party(row[c["party"]])
+        doc_no = row[c["doc"]].strip() if c["doc"] is not None and c["doc"] < len(row) else None
+        op_code = row[c["op"]].strip() if c["op"] is not None and c["op"] < len(row) else None
+        mfo = row[c["mfo"]].strip() if c["mfo"] is not None and c["mfo"] < len(row) else None
+
         transactions.append({
             "date": tx_date,
-            "counterparty": _counterparty(row[1]),
-            "purpose": str(row[7] or "").strip()[:1000] or None,
+            "counterparty": name,
+            "counterparty_account": account,
+            "counterparty_tin": tin,
+            "document_number": doc_no,
+            "operation_code": op_code,
+            "mfo": mfo,
+            "purpose": str(row[c["purpose"]] or "").strip()[:1500] or None,
             "incoming": incoming,
             "outgoing": outgoing,
         })
@@ -170,34 +229,25 @@ def try_analyze_asaka(data: bytes, filename: str = "statement.xls"):
     if not transactions:
         return None
 
-    total_outgoing = round(sum(t["outgoing"] for t in transactions), 2)
-    total_incoming = round(sum(t["incoming"] for t in transactions), 2)
+    total_incoming = round(sum(x["incoming"] for x in transactions), 2)
+    total_outgoing = round(sum(x["outgoing"] for x in transactions), 2)
 
     warnings = []
-    footer_out = footer_in = None
-    for row in reversed(rows[-20:]):
-        if row and "итоговый оборот" in str(row[0]).lower():
-            footer_out = round(_num(row[1] if len(row) > 1 else 0), 2)
-            footer_in = round(_num(row[2] if len(row) > 2 else 0), 2)
-            break
-    if footer_out is not None and abs(footer_out - total_outgoing) > 0.01:
-        warnings.append("Чиқим жами файлдаги итог билан мос эмас.")
-    if footer_in is not None and abs(footer_in - total_incoming) > 0.01:
-        warnings.append("Кирим жами файлдаги итог билан мос эмас.")
-
+    opening, closing = meta["opening"], meta["closing"]
+    balance_ok = False
     if opening is not None and closing is not None:
         expected = round(opening + total_incoming - total_outgoing, 2)
-        if abs(expected - closing) > 0.01:
+        balance_ok = abs(expected - closing) <= 0.05
+        if not balance_ok:
             warnings.append(
                 f"Қолдиқ назоратида фарқ бор: ҳисобланган {expected:,.2f}, файлда {closing:,.2f}."
             )
 
     totals = defaultdict(lambda: {"incoming": 0.0, "outgoing": 0.0})
     for tx in transactions:
-        name = tx.get("counterparty")
-        if name:
-            totals[name]["incoming"] += tx["incoming"]
-            totals[name]["outgoing"] += tx["outgoing"]
+        if tx["counterparty"]:
+            totals[tx["counterparty"]]["incoming"] += tx["incoming"]
+            totals[tx["counterparty"]]["outgoing"] += tx["outgoing"]
 
     top_counterparties = [
         {
@@ -212,10 +262,9 @@ def try_analyze_asaka(data: bytes, filename: str = "statement.xls"):
         )[:10]
     ]
 
-    if not period_from or not period_to:
-        dates = [t["date"] for t in transactions]
-        period_from = period_from or min(dates)
-        period_to = period_to or max(dates)
+    dates = [x["date"] for x in transactions]
+    period_from = meta["period_from"] or min(dates)
+    period_to = meta["period_to"] or max(dates)
 
     summary = (
         f"{len(transactions)} та операция ўқилди. "
@@ -223,15 +272,17 @@ def try_analyze_asaka(data: bytes, filename: str = "statement.xls"):
     )
     if opening is not None and closing is not None:
         summary += f" Бошланғич қолдиқ {opening:,.2f}, якуний қолдиқ {closing:,.2f}."
+    if balance_ok:
+        summary += " Қолдиқ назорати тўғри."
 
     return {
         "document_type": "bank_statement",
         "confidence": 0.99,
         "language": "mixed",
-        "bank_name": bank_name,
-        "account_holder": account_holder,
-        "account_number": account_number,
-        "tax_id": tax_id,
+        "bank_name": meta["bank_name"],
+        "account_holder": meta["account_holder"],
+        "account_number": meta["account_number"],
+        "tax_id": meta["tax_id"],
         "statement_period": {"from": period_from, "to": period_to},
         "currency": "UZS",
         "opening_balance": opening,
@@ -245,5 +296,5 @@ def try_analyze_asaka(data: bytes, filename: str = "statement.xls"):
         "summary": summary,
         "recommended_action": "Натижани текшириб, тўғри бўлса тасдиқланг.",
         "source_filename": filename,
-        "source_format": "asakabank_html",
+        "source_format": "asakabank_html_v2",
     }
