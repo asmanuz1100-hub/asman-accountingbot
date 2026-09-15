@@ -2,6 +2,7 @@ import os
 
 from telegram.ext import ApplicationHandlerStop
 
+import database as business_db
 from access_control import is_admin
 from tenant_control import ensure_tenant_for_user, set_business_schema
 
@@ -53,10 +54,15 @@ def install_runtime_compat(bot_module) -> None:
                     )
                 raise ApplicationHandlerStop
 
-            tenant = ensure_tenant_for_user(user.id, getattr(user, "full_name", None))
-            set_business_schema(tenant["schema_name"])
-            if context is not None and hasattr(context, "user_data"):
-                context.user_data["tenant_id"] = tenant["id"]
+            # Production uses PostgreSQL tenant isolation. Local/CI SQLite keeps
+            # the legacy public workspace so old tests and development tools work.
+            if business_db.engine.dialect.name == "postgresql":
+                tenant = ensure_tenant_for_user(user.id, getattr(user, "full_name", None))
+                set_business_schema(tenant["schema_name"])
+                if context is not None and hasattr(context, "user_data"):
+                    context.user_data["tenant_id"] = tenant["id"]
+            else:
+                set_business_schema("public")
             return
 
         await original_access_check(update, context)
