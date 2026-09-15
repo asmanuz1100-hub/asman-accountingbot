@@ -2,7 +2,17 @@ from io import BytesIO
 
 from telegram import InputFile
 
-from financial_report_pdf import build_financial_report_pdf, collect_financial_snapshot
+import financial_report_pdf as financial_pdf
+
+# Compatibility wrapper for the KPI helper argument order used by the report builder.
+_original_kpi_cell = financial_pdf._kpi_cell
+
+
+def _kpi_cell_compat(title, value, bg, style):
+    return _original_kpi_cell(title, value, style, bg)
+
+
+financial_pdf._kpi_cell = _kpi_cell_compat
 
 
 def install_financial_pdf_ui(bot_module, business_module):
@@ -16,8 +26,8 @@ def install_financial_pdf_ui(bot_module, business_module):
             try:
                 business_module.reclassify_existing_expenses()
                 summary = business_module.financial_analysis()
-                snapshot = collect_financial_snapshot()
-                pdf_bytes = build_financial_report_pdf(snapshot)
+                snapshot = financial_pdf.collect_financial_snapshot()
+                pdf_bytes = financial_pdf.build_financial_report_pdf(snapshot)
 
                 # Telegram text messages have a practical length limit. Keep the
                 # chat summary compact and put the full visual analysis in PDF.
