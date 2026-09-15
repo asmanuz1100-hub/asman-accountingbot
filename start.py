@@ -16,6 +16,7 @@ import menu_customization
 import reconciliation_persistence
 import reconciliation_ui
 import stable_reconciliation
+from access_control import install_access_control
 from asaka_excel import try_analyze_asaka
 from business_controls import (
     enrich_registry_accounts,
@@ -86,6 +87,9 @@ import financial_report_pdf
 install_ledger(enhancements, business_controls, financial_report_pdf)
 install_review_ui(bot_module)
 install_confirmation_safety(bot_module)
+
+# Access control is installed last so it protects the final handler stack.
+install_access_control(bot_module)
 
 main = bot_module.main
 
