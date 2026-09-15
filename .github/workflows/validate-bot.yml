@@ -24,10 +24,12 @@ jobs:
           reconciliation_persistence.py reconciliation_saldo.py reconciliation_ui.py
           reconciliation_pdf_v2.py reset_once.py stable_reconciliation.py
           business_controls.py document_guard.py financial_report_pdf.py financial_pdf_ui.py
+          ledger.py ledger_ui.py report_design.py access_control.py permissions_control.py
+          trial_control.py tenant_control.py admin_monitor.py admin_bot.py
       - name: Import smoke test
         env:
           DATABASE_URL: sqlite:///ci-smoke.db
-        run: python -c "import start; print('startup imports OK')"
+        run: python -c "import start; import admin_bot; print('startup and admin imports OK')"
       - name: Financial PDF smoke test
         env:
           DATABASE_URL: sqlite:///ci-pdf.db
