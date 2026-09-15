@@ -9,6 +9,7 @@ from reset_once import reset_business_data_once
 reset_business_data_once()
 
 # Patch spreadsheet analysis before bot import.
+import business_controls
 import excel_docs
 import enhancements
 import menu_customization
@@ -21,7 +22,9 @@ from business_controls import (
     install_business_core,
     install_business_ui,
 )
+from document_guard import install_document_guard
 from enhancements import enrich_bank_data, install_bot_enhancements
+from financial_pdf_ui import install_financial_pdf_ui
 from incoming_invoice_support import (
     install_incoming_invoice_support,
     try_analyze_invoice_registry_v2,
@@ -73,6 +76,9 @@ install_saldo_fix(enhancements)
 reconciliation_ui.build_reconciliation_pdf = build_reconciliation_pdf_v2
 install_reconciliation_ui(bot_module)
 install_business_ui(bot_module, reconciliation_ui, enhancements)
+install_financial_pdf_ui(bot_module, business_controls)
+# Install last: previews stay read-only and duplicate checks cover the final handler stack.
+install_document_guard(bot_module, enhancements)
 
 main = bot_module.main
 
