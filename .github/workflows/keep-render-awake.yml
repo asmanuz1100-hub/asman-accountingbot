@@ -1,6 +1,8 @@
 name: Keep Render Awake
 
 on:
+  push:
+    branches: [main]
   schedule:
     - cron: "*/15 * * * *"
   workflow_dispatch:
@@ -8,9 +10,15 @@ on:
 jobs:
   ping:
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 5
     steps:
-      - name: Ping Render service
+      - name: Check Render service and Telegram webhook route
+        shell: bash
         run: |
-          echo "Pinging Render service..."
-          curl -sS -L --max-time 90 -o /dev/null -w "HTTP %{http_code}\n" https://asman-accounting-ai-v2.onrender.com || true
+          set +e
+          BASE="https://asman-accounting-ai-v2.onrender.com"
+          echo "Checking Render root..."
+          curl -sS -L --max-time 90 -o /dev/null -w "ROOT HTTP %{http_code}\n" "$BASE/"
+          echo "Checking Telegram webhook route..."
+          curl -sS --max-time 90 -o /dev/null -w "WEBHOOK HTTP %{http_code}\n" "$BASE/telegram"
+          echo "Expected: root may be 404; webhook GET should normally be 405 if the webhook handler is mounted."
