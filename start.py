@@ -98,6 +98,19 @@ install_permissions_control(bot_module)
 install_trial_control(bot_module)
 install_tenant_control(bot_module)
 
+# Persist runtime incidents so the separate Admin Bot can diagnose them without
+# exposing customer document contents.
+from admin_monitor import capture_error
+_original_error_handler = bot_module.error_handler
+
+
+async def _monitored_error_handler(update, context):
+    capture_error(update, context.error)
+    await _original_error_handler(update, context)
+
+
+bot_module.error_handler = _monitored_error_handler
+
 main = bot_module.main
 
 if __name__ == "__main__":
