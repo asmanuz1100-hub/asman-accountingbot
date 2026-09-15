@@ -16,7 +16,7 @@ import menu_customization
 import reconciliation_persistence
 import reconciliation_ui
 import stable_reconciliation
-from access_control import install_access_control, claim_admin, has_admin
+from access_control import install_access_control
 from asaka_excel import try_analyze_asaka
 from business_controls import (
     enrich_registry_accounts,
@@ -88,43 +88,9 @@ install_ledger(enhancements, business_controls, financial_report_pdf)
 install_review_ui(bot_module)
 install_confirmation_safety(bot_module)
 
-# Access control is installed last so it protects the final handler stack.
+# Access control is installed last so it protects the final handler stack and
+# registers the Admin panel callback handlers.
 install_access_control(bot_module)
-
-# Convenience bootstrap: before an admin exists, allow the one-time admin code
-# to be sent by itself (without the "admin:" prefix).
-_secure_access_check = bot_module.access_check
-_secure_text_handler = bot_module.text_handler
-
-
-async def _access_check_with_plain_admin_code(update, context):
-    message = update.effective_message
-    text = (message.text or "").strip() if message else ""
-    claim_code = (os.getenv("ADMIN_CLAIM_CODE") or "").strip()
-    if claim_code and not has_admin() and text == claim_code:
-        return
-    return await _secure_access_check(update, context)
-
-
-async def _text_handler_with_plain_admin_code(update, context):
-    message = update.effective_message
-    user = update.effective_user
-    text = (message.text or "").strip() if message else ""
-    claim_code = (os.getenv("ADMIN_CLAIM_CODE") or "").strip()
-    if user and claim_code and not has_admin() and text == claim_code:
-        ok, reply = claim_admin(
-            user.id,
-            claim_code,
-            username=user.username,
-            full_name=user.full_name,
-        )
-        await message.reply_text(reply, reply_markup=bot_module.MENU if ok else None)
-        return
-    return await _secure_text_handler(update, context)
-
-
-bot_module.access_check = _access_check_with_plain_admin_code
-bot_module.text_handler = _text_handler_with_plain_admin_code
 
 main = bot_module.main
 
