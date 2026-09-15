@@ -1,0 +1,36 @@
+name: Import uploaded bot code
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - .github/upload_ready
+
+permissions:
+  contents: write
+
+jobs:
+  import-code:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Rebuild archive and import source
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat .github/upload_parts/part* | base64 -d > /tmp/asman-code.zip
+          unzip -t /tmp/asman-code.zip
+          unzip -o /tmp/asman-code.zip -d .
+          rm -rf .github/upload_parts .github/upload_ready .github/workflows/import-chatgpt-code.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No source changes to commit."
+            exit 0
+          fi
+          git commit -m "Import uploaded accounting bot code"
+          git push origin HEAD:main
