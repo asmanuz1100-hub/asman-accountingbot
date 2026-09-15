@@ -16,7 +16,7 @@ from access_control import (
     revoke_user,
 )
 from admin_monitor import get_error, list_open_errors, resolve_error
-from tenant_control import BotTenant, BotTenantUser, _provision_schema
+from tenant_control import BotTenant, BotTenantUser, _provision_schema, ensure_tenant_for_user
 from trial_control import BotTrial, cancel_trial, convert_to_paid, start_trial
 
 
@@ -68,15 +68,13 @@ def _dashboard_text() -> str:
                 BotTrial.status == "trial", BotTrial.expires_at > now
             )
         ) or 0
-    pending = len(list_pending_users())
-    errors = len(list_open_errors(100))
     return (
         "🛡 ASMAN ADMIN BOT\n\n"
         f"🏢 Мижоз базалари: {int(customers)}\n"
         f"👥 Фаол фойдаланувчилар: {int(active_users)}\n"
-        f"🟡 Доступ сўровлари: {pending}\n"
+        f"🟡 Доступ сўровлари: {len(list_pending_users())}\n"
         f"🧪 Актив TEST: {int(trials)}\n"
-        f"🚨 Очиқ хатолар: {errors}\n\n"
+        f"🚨 Очиқ хатолар: {len(list_open_errors(100))}\n\n"
         "Бу бот фақат мижозлар ва система бошқаруви учун."
     )
 
@@ -138,7 +136,9 @@ def _customer_detail(tenant_id: int):
     with Session(control_engine) as session:
         t = session.get(BotTenant, int(tenant_id))
         if not t:
-            return "База топилмади.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️", callback_data="adm:customers")]])
+            return "База топилмади.", InlineKeyboardMarkup([
+                [InlineKeyboardButton("⬅️ Мижозлар", callback_data="adm:customers")]
+            ])
         members = list(session.scalars(select(BotTenantUser).where(BotTenantUser.tenant_id == t.id)).all())
         trial = session.get(BotTrial, int(t.owner_user_id))
         access = session.get(BotAccessUser, int(t.owner_user_id))
@@ -172,8 +172,12 @@ def _customer_detail(tenant_id: int):
                 InlineKeyboardButton("💳 Пуллик", callback_data=f"adm:paid:{t.owner_user_id}"),
             ],
             [
-                InlineKeyboardButton("🛠 Базани тиклаш", callback_data=f"adm:repair:{t.id}"),
+                InlineKeyboardButton("✅ Доступ", callback_data=f"adm:grant:{t.owner_user_id}"),
                 InlineKeyboardButton("🚫 Блоклаш", callback_data=f"adm:block:{t.owner_user_id}"),
+            ],
+            [
+                InlineKeyboardButton("🛠 Базани тиклаш", callback_data=f"adm:repair:{t.id}"),
+                InlineKeyboardButton("⏹ TEST тўхтатиш", callback_data=f"adm:canceltrial:{t.owner_user_id}"),
             ],
             [InlineKeyboardButton("⬅️ Мижозлар", callback_data="adm:customers")],
         ]
@@ -245,16 +249,19 @@ def _errors_view():
 def _error_detail(error_id: int):
     row = get_error(error_id)
     if not row:
-        return "Хато топилмади.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️", callback_data="adm:errors")]])
+        return "Хато топилмади.", InlineKeyboardMarkup([
+            [InlineKeyboardButton("⬅️ Хатолар", callback_data="adm:errors")]
+        ])
     trace_tail = (row.traceback_text or "")[-1800:]
+    tenant_text = f"#{row.tenant_id}" if row.tenant_id else "—"
     text = (
         f"🚨 ХАТО #{row.id}\n\n"
         f"Тури: {row.error_type}\n"
         f"Вақт: {_fmt(row.created_at)}\n"
         f"User: {row.telegram_user_id or '—'}\n"
-        f"База: #{row.tenant_id}" if row.tenant_id else f"🚨 ХАТО #{row.id}\n\nТури: {row.error_type}\nВақт: {_fmt(row.created_at)}\nUser: {row.telegram_user_id or '—'}\nБаза: —"
+        f"База: {tenant_text}\n\n"
+        f"Хабар:\n{row.message[:900]}"
     )
-    text += f"\n\nХабар:\n{row.message[:900]}"
     if trace_tail:
         text += f"\n\nДиагностика:\n{trace_tail}"
     buttons = []
@@ -291,46 +298,55 @@ def _repair_tenant(tenant_id: int) -> tuple[bool, str]:
         return False, f"❌ Repair бажарилмади: {type(exc).__name__}: {str(exc)[:500]}"
 
 
+def _customer_detail_for_owner_or_pending(owner_id: int):
+    with Session(control_engine) as session:
+        t = session.scalar(select(BotTenant).where(BotTenant.owner_user_id == int(owner_id)))
+    if t:
+        return _customer_detail(t.id)
+    return _pending_view()
+
+
 async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await _require_admin(update):
         return
     q = update.callback_query
-    await q.answer()
     data = q.data or ""
     admin_id = update.effective_user.id
 
     if data == "adm:home":
+        await q.answer()
         await _edit(q, _dashboard_text(), _home_markup())
         return
     if data == "adm:customers":
+        await q.answer()
         text, kb = _customers_view()
         await _edit(q, text, kb)
         return
     if data == "adm:pending":
+        await q.answer()
         text, kb = _pending_view()
         await _edit(q, text, kb)
         return
     if data == "adm:trials":
+        await q.answer()
         text, kb = _trials_view()
         await _edit(q, text, kb)
         return
     if data == "adm:errors":
+        await q.answer()
         text, kb = _errors_view()
         await _edit(q, text, kb)
         return
 
     if data.startswith("adm:cust:"):
+        await q.answer()
         text, kb = _customer_detail(int(data.rsplit(":", 1)[1]))
         await _edit(q, text, kb)
         return
     if data.startswith("adm:owner:"):
+        await q.answer()
         owner_id = int(data.rsplit(":", 1)[1])
-        with Session(control_engine) as session:
-            t = session.scalar(select(BotTenant).where(BotTenant.owner_user_id == owner_id))
-        if t:
-            text, kb = _customer_detail(t.id)
-        else:
-            text, kb = "Мижоз базаси ҳали яратилмаган.", InlineKeyboardMarkup([[InlineKeyboardButton("⬅️", callback_data="adm:trials")]])
+        text, kb = _customer_detail_for_owner_or_pending(owner_id)
         await _edit(q, text, kb)
         return
 
@@ -339,7 +355,6 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ok, msg = start_trial(admin_id, uid, 14)
         if ok:
             try:
-                from tenant_control import ensure_tenant_for_user
                 ensure_tenant_for_user(uid, _name_for(uid))
             except Exception as exc:
                 msg += f"\n⚠️ База тайёрлашда хато: {type(exc).__name__}"
@@ -356,9 +371,30 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await _edit(q, text, kb)
         return
 
+    if data.startswith("adm:grant:"):
+        uid = int(data.rsplit(":", 1)[1])
+        ok, msg = grant_user(admin_id, uid)
+        if ok:
+            try:
+                ensure_tenant_for_user(uid, _name_for(uid))
+            except Exception as exc:
+                msg += f"\n⚠️ База: {type(exc).__name__}"
+        await q.answer(msg[:180], show_alert=True)
+        text, kb = _customer_detail_for_owner_or_pending(uid)
+        await _edit(q, text, kb)
+        return
+
     if data.startswith("adm:block:"):
         uid = int(data.rsplit(":", 1)[1])
         ok, msg = revoke_user(admin_id, uid)
+        await q.answer(msg[:180], show_alert=True)
+        text, kb = _customer_detail_for_owner_or_pending(uid)
+        await _edit(q, text, kb)
+        return
+
+    if data.startswith("adm:canceltrial:"):
+        uid = int(data.rsplit(":", 1)[1])
+        ok, msg = cancel_trial(admin_id, uid)
         await q.answer(msg[:180], show_alert=True)
         text, kb = _customer_detail_for_owner_or_pending(uid)
         await _edit(q, text, kb)
@@ -373,30 +409,24 @@ async def callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     if data.startswith("adm:error:"):
+        await q.answer()
         text, kb = _error_detail(int(data.rsplit(":", 1)[1]))
         await _edit(q, text, kb)
         return
 
     if data.startswith("adm:resolve:"):
         error_id = int(data.rsplit(":", 1)[1])
-        resolve_error(error_id, admin_id)
-        await q.answer("✅ Хато ёпилди.", show_alert=True)
+        ok = resolve_error(error_id, admin_id)
+        await q.answer("✅ Хато ёпилди." if ok else "Хато топилмади.", show_alert=True)
         text, kb = _errors_view()
         await _edit(q, text, kb)
         return
 
-
-def _customer_detail_for_owner_or_pending(owner_id: int):
-    with Session(control_engine) as session:
-        t = session.scalar(select(BotTenant).where(BotTenant.owner_user_id == int(owner_id)))
-    if t:
-        return _customer_detail(t.id)
-    return _pending_view()
+    await q.answer("Номаълум команда.", show_alert=True)
 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
-    # Admin Bot errors are intentionally not recursively written into the same
-    # incident stream; Render logs remain the fallback for Admin Bot itself.
+    # Admin Bot errors are not recursively written into the customer error stream.
     return
 
 
