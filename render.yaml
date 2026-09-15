@@ -4,7 +4,7 @@ services:
     runtime: python
     plan: free
     region: oregon
-    buildCommand: pip install -r requirements.txt && python -m py_compile start.py bot.py database.py excel_docs.py enhancements.py asaka_excel.py invoice_registry.py incoming_invoice_support.py menu_customization.py reconciliation_persistence.py reconciliation_saldo.py reconciliation_ui.py reconciliation_pdf_v2.py reset_once.py stable_reconciliation.py business_controls.py document_guard.py financial_report_pdf.py financial_pdf_ui.py ledger.py ledger_ui.py report_design.py access_control.py permissions_control.py trial_control.py tenant_control.py admin_monitor.py admin_bot.py
+    buildCommand: pip install -r requirements.txt && python -m py_compile start.py bot.py database.py excel_docs.py enhancements.py asaka_excel.py invoice_registry.py incoming_invoice_support.py menu_customization.py reconciliation_persistence.py reconciliation_saldo.py reconciliation_ui.py reconciliation_pdf_v2.py reset_once.py stable_reconciliation.py business_controls.py document_guard.py financial_report_pdf.py financial_pdf_ui.py ledger.py ledger_ui.py report_design.py access_control.py permissions_control.py trial_control.py tenant_control.py admin_monitor.py admin_bot.py runtime_compat.py
     startCommand: python start.py
     envVars:
       - key: RUN_MODE
@@ -20,6 +20,27 @@ services:
       - key: BOT_TOKEN
         sync: false
       - key: OPENAI_API_KEY
+        sync: false
+      - key: DATABASE_URL
+        fromDatabase:
+          name: asman-accounting-db-v2
+          property: connectionString
+
+  - type: web
+    name: asman-accounting-admin
+    runtime: python
+    plan: free
+    region: oregon
+    buildCommand: pip install -r requirements.txt && python -m py_compile admin_bot.py admin_monitor.py access_control.py permissions_control.py trial_control.py tenant_control.py database.py
+    startCommand: python admin_bot.py
+    envVars:
+      - key: ADMIN_RUN_MODE
+        value: webhook
+      - key: ADMIN_WEBHOOK_PATH
+        value: admin-telegram
+      - key: ADMIN_WEBHOOK_SECRET
+        sync: false
+      - key: ADMIN_BOT_TOKEN
         sync: false
       - key: DATABASE_URL
         fromDatabase:
