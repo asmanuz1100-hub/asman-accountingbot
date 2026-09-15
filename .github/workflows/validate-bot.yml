@@ -32,3 +32,6 @@ jobs:
         env:
           DATABASE_URL: sqlite:///ci-pdf.db
         run: python -c "import start; import financial_report_pdf as f; data=f.collect_financial_snapshot(); pdf=f.build_financial_report_pdf(data); assert len(pdf) > 1000; print('financial PDF OK', len(pdf))"
+
+      - name: Accounting regression tests
+        run: python -m unittest discover -s tests -v
