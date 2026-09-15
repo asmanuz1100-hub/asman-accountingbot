@@ -12,13 +12,24 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
-      - name: Check Render service and Telegram webhook route
+      - name: Check Render service and refreshed Telegram webhook route
         shell: bash
         run: |
           set +e
           BASE="https://asman-accounting-ai-v2.onrender.com"
           echo "Checking Render root..."
-          curl -sS -L --max-time 90 -o /dev/null -w "ROOT HTTP %{http_code}\n" "$BASE/"
-          echo "Checking Telegram webhook route..."
-          curl -sS --max-time 90 -o /dev/null -w "WEBHOOK HTTP %{http_code}\n" "$BASE/telegram"
-          echo "Expected: root may be 404; webhook GET should normally be 405 if the webhook handler is mounted."
+          curl -sS -L --max-time 30 -o /dev/null -w "ROOT HTTP %{http_code}\n" "$BASE/"
+
+          echo "Checking refreshed Telegram webhook route..."
+          for attempt in $(seq 1 18); do
+            code=$(curl -sS --max-time 30 -o /dev/null -w "%{http_code}" "$BASE/telegram-v2")
+            echo "Attempt $attempt: WEBHOOK-V2 HTTP $code"
+            if [ "$code" = "405" ]; then
+              echo "Refreshed webhook handler is mounted."
+              exit 0
+            fi
+            sleep 10
+          done
+
+          echo "Refreshed webhook route did not become available."
+          exit 1
