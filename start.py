@@ -17,6 +17,7 @@ import reconciliation_persistence
 import reconciliation_ui
 import stable_reconciliation
 from access_control import install_access_control
+from permissions_control import install_permissions_control
 from asaka_excel import try_analyze_asaka
 from business_controls import (
     enrich_registry_accounts,
@@ -88,9 +89,10 @@ install_ledger(enhancements, business_controls, financial_report_pdf)
 install_review_ui(bot_module)
 install_confirmation_safety(bot_module)
 
-# Access control is installed last so it protects the final handler stack and
-# registers the Admin panel callback handlers.
+# General access first, then per-section permissions. Admin always bypasses
+# section restrictions; regular users receive only the rights Admin leaves on.
 install_access_control(bot_module)
+install_permissions_control(bot_module)
 
 main = bot_module.main
 
