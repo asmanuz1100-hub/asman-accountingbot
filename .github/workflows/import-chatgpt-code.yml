@@ -1,4 +1,4 @@
-name: Import uploaded bot code
+name: Finish uploaded bot assets
 
 on:
   push:
@@ -10,29 +10,32 @@ permissions:
   contents: write
 
 jobs:
-  import-code:
+  finish-assets:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - name: Rebuild archive and import source
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Add bundled fonts and sample reports
         shell: bash
         run: |
           set -euo pipefail
-          cat .github/upload_parts/part{000..009} | base64 -d > /tmp/asman-code.tar.xz
-          xz -t /tmp/asman-code.tar.xz
-          tar -xJf /tmp/asman-code.tar.xz -C .
-          rm -f .github/workflows/install-fonts.yml
-          git checkout HEAD -- .github/workflows/validate-bot.yml .github/workflows/keep-render-awake.yml
-          rm -rf .github/upload_parts .github/upload_ready
+          mkdir -p fonts samples
+          cp /usr/share/fonts/truetype/dejavu/DejaVuSans.ttf fonts/DejaVuSans.ttf
+          cp /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf fonts/DejaVuSans-Bold.ttf
+          pip install -r requirements.txt
+          DEMO_OUTPUT=samples python demo_reports.py
+          rm -f .github/upload_ready
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -A
+          git add fonts/DejaVuSans.ttf fonts/DejaVuSans-Bold.ttf samples .github/upload_ready
           if git diff --cached --quiet; then
-            echo "No source changes to commit."
+            echo "No asset changes to commit."
             exit 0
           fi
-          git commit -m "Import uploaded accounting bot code"
+          git commit -m "Add accounting bot fonts and sample reports"
           git push origin HEAD:main
