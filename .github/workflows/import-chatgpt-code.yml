@@ -21,7 +21,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          cat .github/upload_parts/part* | base64 -d > /tmp/asman-code.tar.xz
+          cat .github/upload_parts/part{000..009} | base64 -d > /tmp/asman-code.tar.xz
+          xz -t /tmp/asman-code.tar.xz
           tar -xJf /tmp/asman-code.tar.xz -C .
           rm -rf .github/upload_parts .github/upload_ready .github/workflows/import-chatgpt-code.yml
           git config user.name "github-actions[bot]"
