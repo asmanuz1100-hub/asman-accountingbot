@@ -28,3 +28,7 @@ jobs:
         env:
           DATABASE_URL: sqlite:///ci-smoke.db
         run: python -c "import start; print('startup imports OK')"
+      - name: Financial PDF smoke test
+        env:
+          DATABASE_URL: sqlite:///ci-pdf.db
+        run: python -c "import start; import financial_report_pdf as f; data=f.collect_financial_snapshot(); pdf=f.build_financial_report_pdf(data); assert len(pdf) > 1000; print('financial PDF OK', len(pdf))"
