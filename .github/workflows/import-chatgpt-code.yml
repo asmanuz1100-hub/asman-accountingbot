@@ -24,6 +24,7 @@ jobs:
           cat .github/upload_parts/part{000..009} | base64 -d > /tmp/asman-code.tar.xz
           xz -t /tmp/asman-code.tar.xz
           tar -xJf /tmp/asman-code.tar.xz -C .
+          rm -f .github/workflows/install-fonts.yml
           rm -rf .github/upload_parts .github/upload_ready .github/workflows/import-chatgpt-code.yml
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
