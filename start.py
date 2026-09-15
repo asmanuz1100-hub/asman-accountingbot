@@ -20,6 +20,7 @@ from access_control import install_access_control
 from permissions_control import install_permissions_control
 from trial_control import install_trial_control
 from tenant_control import install_tenant_control
+from runtime_compat import install_runtime_compat
 from asaka_excel import try_analyze_asaka
 from business_controls import (
     enrich_registry_accounts,
@@ -97,6 +98,9 @@ install_access_control(bot_module)
 install_permissions_control(bot_module)
 install_trial_control(bot_module)
 install_tenant_control(bot_module)
+# Preserve compatibility with the original explicit ALLOWED_USER_IDS deployment
+# mode and lightweight Telegram update wrappers.
+install_runtime_compat(bot_module)
 
 # Persist runtime incidents so the separate Admin Bot can diagnose them without
 # exposing customer document contents.
