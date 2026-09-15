@@ -9,6 +9,8 @@ services:
     envVars:
       - key: RUN_MODE
         value: webhook
+      - key: WEBHOOK_PATH
+        value: telegram-v2
       - key: OPENAI_MODEL
         value: gpt-5.6-luna
       - key: ALLOWED_USER_IDS
