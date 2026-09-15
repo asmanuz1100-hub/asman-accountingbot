@@ -1,5 +1,9 @@
 import os
 
+# Force a fresh webhook registration after deployment. This avoids stale Telegram
+# webhook URLs surviving across Render redeploys.
+os.environ["WEBHOOK_PATH"] = "telegram-v2"
+
 # Never delete business data during startup.
 from database import init_db
 init_db()
