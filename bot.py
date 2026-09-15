@@ -437,6 +437,9 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
 
 async def access_check(update, context):
     allowed = {v.strip() for v in os.getenv("ALLOWED_USER_IDS", "").split(",") if v.strip()}
+    # Backward-compatible default: if no allow-list is configured, do not block users.
+    if not allowed:
+        return
     user = update.effective_user
     if user and str(user.id) in allowed:
         return
