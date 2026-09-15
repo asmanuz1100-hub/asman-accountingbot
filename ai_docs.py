@@ -19,6 +19,8 @@ PROMPT = """
 {
   "document_type": "contract|invoice|act|waybill|payment|warehouse_receipt|other",
   "confidence": 0.0,
+  "direction": "incoming|outgoing|null",
+  "status": null,
   "language": "uz|ru|en|mixed",
   "partner": {
     "name": null,
@@ -50,6 +52,7 @@ PROMPT = """
 }
 
 Қоидалар:
+- Фактурада direction: ASMAN SILICAT сотувчи бўлса outgoing, харидор бўлса incoming. Аниқ бўлмаса null. Тўловда direction пулнинг кирим/чиқим йўналиши.
 - Аниқ кўринмаган маълумотни ўйлаб топма; null қўй.
 - Суммаларни рақам шаклида бер.
 - НДС/ҚҚС бор бўлса алоҳида кўрсат.

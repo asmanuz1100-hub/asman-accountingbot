@@ -64,16 +64,24 @@ def _date(value: Any) -> str | None:
         return None
 
 
-def _find_header(rows: list[list[str]]):
-    for i, row in enumerate(rows[:50]):
-        headers = [_norm(x) for x in row]
-        joined = " | ".join(headers)
-        score = 0
-        for token in ("кир/чиқ", "контрагент номи", "контрагент стир", "хужжат рақами", "ққс билан сумма"):
-            if token in joined:
-                score += 1
-        if score >= 4:
-            return i, headers
+def _find_header(rows):
+    aliases = {
+        "направление":"кир/чиқ", "direction":"кир/чиқ", "кир/чик":"кир/чиқ",
+        "контрагент":"контрагент номи", "наименование контрагента":"контрагент номи", "counterparty":"контрагент номи",
+        "инн контрагента":"контрагент стир", "инн":"контрагент стир", "стир":"контрагент стир",
+        "номер документа":"хужжат рақами", "№ документа":"хужжат рақами", "ҳужжат рақами":"хужжат рақами",
+        "дата документа":"хужжат санаси", "ҳужжат санаси":"хужжат санаси",
+        "сумма с ндс":"ққс билан сумма", "итого с ндс":"ққс билан сумма", "total":"ққс билан сумма",
+        "сумма без ндс":"ққссиз сумма", "сумма ндс":"ққс суммаси",
+        "статус":"ҳолати", "вид документа":"хужжат тури", "тип документа":"хужжат тури",
+        "договор":"шартнома", "номер договора":"шартнома",
+    }
+    for i,row in enumerate(rows[:60]):
+        headers=[aliases.get(_norm(x),_norm(x)) for x in row]
+        joined=' | '.join(headers)
+        essentials=('контрагент номи','хужжат рақами','ққс билан сумма')
+        if all(t in joined for t in essentials) and any(t in joined for t in ('кир/чиқ','хужжат тури','ҳолати')):
+            return i,headers
     return None
 
 
@@ -90,17 +98,9 @@ def _cell(row: list[str], idx: int | None):
     return row[idx]
 
 
-def _status_group(value: str) -> str:
-    s = _norm(value)
-    if any(x in s for x in ("имзоланган", "подписан", "signed")):
-        return "signed"
-    if any(x in s for x in ("кутил", "ожида", "pending")):
-        return "pending"
-    if any(x in s for x in ("ўчирилган", "учирилган", "удален", "deleted")):
-        return "deleted"
-    if any(x in s for x in ("хақиқий эмас", "ҳақиқий эмас", "недейств", "invalid")):
-        return "invalid"
-    return "other"
+def _status_group(value):
+    from ledger import status
+    return status(value)
 
 
 def _direction(value: str) -> str:
@@ -123,7 +123,7 @@ def try_analyze_invoice_registry(data: bytes, filename: str = "registry.xlsx") -
         return None
     header_index, headers = header_info
 
-    c_no = _find_col(headers, "№")
+    c_no = next((i for i,h in enumerate(headers) if h in ("№", "п/п", "№ п/п")), None)
     c_dir = _find_col(headers, "кир/чиқ", "кир/чик")
     c_status = _find_col(headers, "ҳолати", "холати", "статус")
     c_type = _find_col(headers, "хужжат (тури)", "ҳужжат (тури)", "хужжат тури")
@@ -139,14 +139,13 @@ def try_analyze_invoice_registry(data: bytes, filename: str = "registry.xlsx") -
     if c_partner is None or c_gross is None or c_doc_no is None:
         return None
 
+    c_account = _find_col(headers, "расчетный счет", "ҳисоб рақами", "хисоб раками", "контрагент счет", "account")
+    c_currency = _find_col(headers, "валюта", "currency")
     invoices = []
-    for row in rows[header_index + 1:]:
-        first = _text(_cell(row, c_no))
-        if not first or _norm(first) in {"жами", "итого", "total"}:
+    for line_no, row in enumerate(rows[header_index + 1:], header_index + 2):
+        first = _text(_cell(row, c_no)) if c_no is not None else str(line_no)
+        if _norm(first) in {"жами", "итого", "total"}:
             continue
-        if not re.fullmatch(r"\d+", first):
-            continue
-
         partner = _text(_cell(row, c_partner))
         doc_no = _text(_cell(row, c_doc_no))
         if not partner and not doc_no:
@@ -156,7 +155,9 @@ def try_analyze_invoice_registry(data: bytes, filename: str = "registry.xlsx") -
         direction_raw = _text(_cell(row, c_dir))
         partner_tin = _tin(_cell(row, c_tin)) or None
         invoices.append({
-            "row_no": int(first),
+            "row_no": int(float(first)) if re.fullmatch(r"\d+(?:\.0+)?", first) else line_no,
+            "counterparty_account": _cell(row, c_account) or None,
+            "currency": _cell(row, c_currency) or "UZS",
             "direction": _direction(direction_raw),
             "direction_raw": direction_raw,
             "status": status,

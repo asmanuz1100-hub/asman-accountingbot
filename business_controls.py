@@ -218,7 +218,7 @@ def enrich_registry_accounts(raw: bytes, filename: str, result: dict) -> dict:
 
     for inv in result.get("invoices") or []:
         account = row_accounts.get(inv.get("row_no"))
-        if account:
+        if account and not inv.get("counterparty_account"):
             inv["counterparty_account"] = account
 
     by_tin = defaultdict(set)

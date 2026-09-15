@@ -485,3 +485,8 @@ def build_financial_report_pdf(snapshot=None):
 
     doc.build(story)
     return buffer.getvalue()
+
+# Public export uses the same currency-separated read model as the bot.
+from report_design import build_financial_report_pdf
+from ledger import Ledger
+collect_financial_snapshot = lambda: Ledger().snapshot()

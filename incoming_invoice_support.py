@@ -385,7 +385,7 @@ def install_incoming_invoice_support(bot_module):
 
         await original_confirm_callback(update, context)
 
-        if is_confirm and isinstance(pending_data, dict) and pending_data.get("document_type") == "invoice_registry":
+        if is_confirm and not context.user_data.get("pending_doc") and isinstance(pending_data, dict) and pending_data.get("document_type") == "invoice_registry":
             try:
                 added, total, amounts = _sync_incoming_invoices(pending_data)
                 if added:

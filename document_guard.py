@@ -209,7 +209,7 @@ def _rebuild_bank(data, transactions, duplicate_count):
     data["warnings"] = warnings[:12]
     data["summary"] = (
         f"Янги {len(transactions)} та банк операцияси топилди. "
-        f"Кирим {data['total_incoming']:,.2f}, чиқим {data['total_outgoing']:,.2f} UZS."
+        f"Кирим {data['total_incoming']:,.2f}, чиқим {data['total_outgoing']:,.2f} {data.get('currency') or 'UZS'}."
         + (f" {duplicate_count} та такрорий операция ўтказиб юборилди." if duplicate_count else "")
     )
     return original_count
@@ -317,7 +317,7 @@ def _rebuild_invoice_registry(data, invoices, duplicate_count):
     data["summary"] = (
         f"Янги {len(invoices)} та реестр қатори топилди. "
         f"Имзоланган чиқувчи {data['signed_sales_total']:,.2f} UZS, "
-        f"кирувчи {data['signed_purchases_total']:,.2f} UZS."
+        f"кирувчи {data['signed_purchases_total']:,.2f} {data.get('currency') or 'UZS'}."
         + (f" {duplicate_count} та такрорий қатор ўтказиб юборилди." if duplicate_count else "")
     )
     return original_count
@@ -332,37 +332,19 @@ def prepare_new_document(data: dict, file_hash: str = "", filename: str = ""):
 
     if doc_type == "bank_statement":
         source = list(result.get("transactions") or result.get("transactions_preview") or [])
-        existing = _existing_bank_signatures()
-        current = set()
-        new_rows, duplicate_count = [], 0
-        for row in source:
-            sig = _bank_signature(row)
-            if sig in existing or sig in current:
-                duplicate_count += 1
-                continue
-            current.add(sig)
-            new_rows.append(row)
-        if not new_rows and source:
-            return {"status": "duplicate", "data": result, "new_count": 0, "duplicate_count": duplicate_count}
-        original_count = _rebuild_bank(result, new_rows, duplicate_count)
-        new_count = len(new_rows)
+        original_count = len(source)
+        duplicate_count = 0
+        new_count = len(source)
+        _rebuild_bank(result, source, 0)
 
     elif doc_type == "invoice_registry":
+        # Retain the full new registry snapshot: changed status/amount is a version,
+        # not another sale. The ledger selects the current version for reports.
         source = list(result.get("invoices") or [])
-        existing = _existing_invoice_signatures()
-        current = set()
-        new_rows, duplicate_count = [], 0
-        for row in source:
-            sig = _invoice_signature(row)
-            if sig in existing or sig in current:
-                duplicate_count += 1
-                continue
-            current.add(sig)
-            new_rows.append(row)
-        if not new_rows and source:
-            return {"status": "duplicate", "data": result, "new_count": 0, "duplicate_count": duplicate_count}
-        original_count = _rebuild_invoice_registry(result, new_rows, duplicate_count)
-        new_count = len(new_rows)
+        original_count = len(source)
+        duplicate_count = 0
+        new_count = len(source)
+        _rebuild_invoice_registry(result, source, 0)
 
     else:
         sig = _generic_signature(result)
@@ -449,9 +431,13 @@ def install_document_guard(bot_module, enhancements_module):
 
     async def document_handler(update, context):
         doc = update.message.document
+        if doc.file_size and doc.file_size > bot_module.MAX_FILE_MB * 1024 * 1024:
+            await update.message.reply_text(f"❌ Файл лимити: {bot_module.MAX_FILE_MB} MB.")
+            return
         try:
             tg_file = await context.bot.get_file(doc.file_id)
             raw = bytes(await tg_file.download_as_bytearray())
+            context.user_data["_downloaded_raw"] = raw
             digest = file_sha256(raw)
             duplicate = find_exact_file_duplicate(digest)
             if duplicate:
@@ -470,12 +456,14 @@ def install_document_guard(bot_module, enhancements_module):
             await original_document_handler(update, context)
         finally:
             context.user_data.pop("_upload_file_sha", None)
+            context.user_data.pop("_downloaded_raw", None)
 
     async def photo_handler(update, context):
         try:
             photo = update.message.photo[-1]
             tg_file = await context.bot.get_file(photo.file_id)
             raw = bytes(await tg_file.download_as_bytearray())
+            context.user_data["_downloaded_raw"] = raw
             digest = file_sha256(raw)
             duplicate = find_exact_file_duplicate(digest)
             if duplicate:
@@ -494,6 +482,7 @@ def install_document_guard(bot_module, enhancements_module):
             await original_photo_handler(update, context)
         finally:
             context.user_data.pop("_upload_file_sha", None)
+            context.user_data.pop("_downloaded_raw", None)
 
     async def confirm_callback(update, context):
         query = update.callback_query

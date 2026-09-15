@@ -1,3 +1,5 @@
+import asyncio
+import secrets
 import logging
 import os
 
@@ -9,6 +11,8 @@ from telegram.ext import (
     ContextTypes,
     MessageHandler,
     filters,
+    TypeHandler,
+    ApplicationHandlerStop,
 )
 
 from ai_docs import analyze_image_bytes, analyze_pdf_bytes
@@ -296,13 +300,20 @@ async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def show_analysis(update: Update, context: ContextTypes.DEFAULT_TYPE, data: dict,
                         telegram_file_id: str, filename: str, mime_type: str):
+    nonce = secrets.token_hex(8)
     context.user_data["pending_doc"] = {
+        "nonce": nonce,
         "data": data,
         "telegram_file_id": telegram_file_id,
         "filename": filename,
         "mime_type": mime_type,
     }
-    await update.effective_message.reply_text(analysis_text(data), reply_markup=CONFIRM_KB)
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton("✅ Тасдиқлаш", callback_data=f"doc_confirm:{nonce}"),
+        InlineKeyboardButton("❌ Бекор қилиш", callback_data=f"doc_cancel:{nonce}"),
+    ]])
+    message = await update.effective_message.reply_text(analysis_text(data)[:3900], reply_markup=kb)
+    context.user_data["pending_doc"].update(message_id=message.message_id, chat_id=message.chat.id)
 
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -310,8 +321,10 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         photo = update.message.photo[-1]
         tg_file = await context.bot.get_file(photo.file_id)
-        raw = bytes(await tg_file.download_as_bytearray())
-        data = analyze_image_bytes(raw, "image/jpeg")
+        raw = context.user_data.pop("_downloaded_raw", None)
+        if raw is None:
+            raw = bytes(await tg_file.download_as_bytearray())
+        data = await asyncio.to_thread(analyze_image_bytes, raw, "image/jpeg")
         await status.edit_text("✅ Таҳлил тайёр.")
         await show_analysis(update, context, data, photo.file_id, "telegram_photo.jpg", "image/jpeg")
     except Exception as exc:
@@ -355,14 +368,16 @@ async def document_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     try:
         tg_file = await context.bot.get_file(doc.file_id)
-        raw = bytes(await tg_file.download_as_bytearray())
+        raw = context.user_data.pop("_downloaded_raw", None)
+        if raw is None:
+            raw = bytes(await tg_file.download_as_bytearray())
 
         if is_excel:
             data = analyze_spreadsheet_bytes(raw, filename)
         elif is_pdf:
-            data = analyze_pdf_bytes(raw, filename)
+            data = await asyncio.to_thread(analyze_pdf_bytes, raw, filename)
         else:
-            data = analyze_image_bytes(raw, mime or "image/jpeg")
+            data = await asyncio.to_thread(analyze_image_bytes, raw, mime or "image/jpeg")
 
         await status.edit_text("✅ Таҳлил тайёр.")
         await show_analysis(update, context, data, doc.file_id, filename, mime)
@@ -419,15 +434,29 @@ async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE):
     log.exception("Unhandled bot error", exc_info=context.error)
 
 
+
+async def access_check(update, context):
+    allowed = {v.strip() for v in os.getenv("ALLOWED_USER_IDS", "").split(",") if v.strip()}
+    user = update.effective_user
+    if user and str(user.id) in allowed:
+        return
+    if update.callback_query:
+        await update.callback_query.answer("Киришга рухсат йўқ.", show_alert=True)
+    elif update.effective_message:
+        uid = user.id if user else "-"
+        await update.effective_message.reply_text(f"🔐 Киришга рухсат берилмаган. Администраторга Telegram ID’ингизни юборинг: {uid}")
+    raise ApplicationHandlerStop
+
 def main():
     if not TOKEN:
         raise RuntimeError("BOT_TOKEN киритилмаган")
 
     init_db()
     app = Application.builder().token(TOKEN).build()
+    app.add_handler(TypeHandler(Update, access_check), group=-1)
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("help", help_cmd))
-    app.add_handler(CallbackQueryHandler(confirm_callback, pattern=r"^doc_(confirm|cancel)$"))
+    app.add_handler(CallbackQueryHandler(confirm_callback, pattern=r"^doc_(confirm|cancel)(?::[0-9a-f]+)?$"))
     app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
     app.add_handler(MessageHandler(filters.Document.ALL, document_handler))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
@@ -447,10 +476,10 @@ def main():
             url_path=path,
             webhook_url=f"{base_url}/{path}",
             secret_token=secret,
-            drop_pending_updates=True,
+            drop_pending_updates=False,
         )
     else:
-        app.run_polling(drop_pending_updates=True)
+        app.run_polling(drop_pending_updates=False)
 
 
 if __name__ == "__main__":

@@ -1,12 +1,8 @@
 import os
 
-# Old Render Blueprint deployments may retain an invalid Telegram webhook secret.
-os.environ.pop("WEBHOOK_SECRET", None)
-
-# Create schema and wipe old business data exactly once for the requested clean start.
-from reset_once import reset_business_data_once
-
-reset_business_data_once()
+# Never delete business data during startup.
+from database import init_db
+init_db()
 
 # Patch spreadsheet analysis before bot import.
 import business_controls
@@ -31,7 +27,7 @@ from incoming_invoice_support import (
 )
 from invoice_registry import try_analyze_invoice_registry
 from menu_customization import install_menu_customization
-from reconciliation_pdf_v2 import build_reconciliation_pdf_v2
+from report_design import build_reconciliation_pdf as build_reconciliation_pdf_v2
 from reconciliation_persistence import install_reconciliation_persistence
 from reconciliation_saldo import install_saldo_fix
 from reconciliation_ui import install_reconciliation_ui
@@ -79,6 +75,13 @@ install_business_ui(bot_module, reconciliation_ui, enhancements)
 install_financial_pdf_ui(bot_module, business_controls)
 # Install last: previews stay read-only and duplicate checks cover the final handler stack.
 install_document_guard(bot_module, enhancements)
+
+from ledger import install_ledger
+from ledger_ui import install_review_ui, install_confirmation_safety
+import financial_report_pdf
+install_ledger(enhancements, business_controls, financial_report_pdf)
+install_review_ui(bot_module)
+install_confirmation_safety(bot_module)
 
 main = bot_module.main
 

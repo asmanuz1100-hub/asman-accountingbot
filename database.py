@@ -256,11 +256,15 @@ def add_material(name: str, qty: float, unit: str = "kg") -> None:
         raise ValueError("Хом ашё номи бўш")
 
     with Session(engine) as session:
-        material = session.scalar(select(Material).where(func.lower( Material.name) == clean.lower()))
+        material = next((m for m in session.scalars(select(Material)).all() if m.name.casefold() == clean.casefold()), None)
         if material:
+            units = {"kg": ("mass", 1), "кг": ("mass", 1), "ton": ("mass", 1000), "t": ("mass", 1000), "тонна": ("mass", 1000), "т": ("mass", 1000), "g": ("mass", .001), "г": ("mass", .001)}
+            old, new = units.get(material.unit.lower()), units.get((unit or material.unit).lower())
+            if unit and unit.lower() != material.unit.lower():
+                if not old or not new or old[0] != new[0]:
+                    raise ValueError("Ўлчов бирликлари мос эмас")
+                qty = float(qty) * new[1] / old[1]
             material.qty += float(qty)
-            if unit:
-                material.unit = unit
         else:
             session.add(Material(name=clean, qty=float(qty), unit=unit or "kg"))
         session.commit()

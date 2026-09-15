@@ -296,7 +296,7 @@ def install_menu_customization(bot_module):
 
         await original_confirm_callback(update, context)
 
-        if is_confirm and isinstance(pending_data, dict) and pending_data.get("document_type") == "bank_statement":
+        if is_confirm and not context.user_data.get("pending_doc") and isinstance(pending_data, dict) and pending_data.get("document_type") == "bank_statement":
             try:
                 added, amounts = _sync_bank_expenses(pending_data)
                 if added:
