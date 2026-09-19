@@ -21,7 +21,7 @@ def _one_time_business_clean():
         if dbname != "asman_accounting_db_v2":
             raise RuntimeError("Unexpected database; clean start stopped")
         marker = conn.execute(_clean_sql(
-            "SELECT meta_value FROM public.app_meta WHERE meta_key = 'xisob_clean_20260920'"
+            "SELECT meta_value FROM public.app_meta WHERE meta_key = 'xisob_clean_20260920_v2'"
         )).scalar_one_or_none()
         if marker == "done":
             return
@@ -31,7 +31,7 @@ def _one_time_business_clean():
         ))
         conn.execute(_clean_sql(
             "INSERT INTO public.app_meta(meta_key,meta_value) "
-            "VALUES ('xisob_clean_20260920','done') "
+            "VALUES ('xisob_clean_20260920_v2','done') "
             "ON CONFLICT(meta_key) DO UPDATE SET meta_value='done'"
         ))
 
