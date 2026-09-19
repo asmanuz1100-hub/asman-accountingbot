@@ -8,6 +8,35 @@ os.environ["WEBHOOK_PATH"] = "telegram-v2"
 from database import init_db
 init_db()
 
+# XISOB_CLEAN_20260920: one-time user-approved clean start of business data.
+# This runs against public only, leaving access control and agentbot intact.
+from sqlalchemy import text as _clean_sql
+from database import engine as _clean_engine
+
+def _one_time_business_clean():
+    if _clean_engine.dialect.name != "postgresql":
+        raise RuntimeError("Production clean start only supports PostgreSQL")
+    with _clean_engine.begin() as conn:
+        dbname = conn.execute(_clean_sql("SELECT current_database()")).scalar_one()
+        if dbname != "asman_accounting_db_v2":
+            raise RuntimeError("Unexpected database; clean start stopped")
+        marker = conn.execute(_clean_sql(
+            "SELECT meta_value FROM public.app_meta WHERE meta_key = 'xisob_clean_20260920'"
+        )).scalar_one_or_none()
+        if marker == "done":
+            return
+        conn.execute(_clean_sql(
+            "TRUNCATE public.contracts, public.materials, "
+            "public.documents, public.partners RESTART IDENTITY RESTRICT"
+        ))
+        conn.execute(_clean_sql(
+            "INSERT INTO public.app_meta(meta_key,meta_value) "
+            "VALUES ('xisob_clean_20260920','done') "
+            "ON CONFLICT(meta_key) DO UPDATE SET meta_value='done'"
+        ))
+
+_one_time_business_clean()
+
 # Patch spreadsheet analysis before bot import.
 import business_controls
 import excel_docs
